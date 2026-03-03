@@ -112,7 +112,7 @@ impl Database {
             .execute("DELETE FROM links WHERE source_id = ?1", params![note_id])?;
         let mut stmt = self
             .conn
-            .prepare_cached("INSERT INTO links (source_id, target) VALUES (?1, ?2)")?;
+            .prepare_cached("INSERT OR IGNORE INTO links (source_id, target) VALUES (?1, ?2)")?;
         for link in links {
             stmt.execute(params![note_id, link])?;
         }

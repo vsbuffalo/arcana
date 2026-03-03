@@ -16,14 +16,14 @@ fn full_index_and_stats() {
     let vault = open_test_vault();
     let stats = vault.index().unwrap();
 
-    // We have 9 .md files in the fixture (excluding .obsidian)
-    assert_eq!(stats.notes_scanned, 9);
-    assert_eq!(stats.notes_added, 9);
+    // We have 10 .md files in the fixture (excluding .obsidian)
+    assert_eq!(stats.notes_scanned, 10);
+    assert_eq!(stats.notes_added, 10);
     assert_eq!(stats.notes_removed, 0);
     assert_eq!(stats.notes_unchanged, 0);
 
     let vault_stats = vault.stats().unwrap();
-    assert_eq!(vault_stats.total_notes, 9);
+    assert_eq!(vault_stats.total_notes, 10);
     assert!(vault_stats.total_tags > 0);
     assert!(vault_stats.total_links > 0);
 }
@@ -34,13 +34,13 @@ fn incremental_reindex_skips_unchanged() {
 
     // First index
     let stats1 = vault.index().unwrap();
-    assert_eq!(stats1.notes_added, 9);
+    assert_eq!(stats1.notes_added, 10);
 
     // Second index — everything should be unchanged
     let stats2 = vault.index().unwrap();
     assert_eq!(stats2.notes_added, 0);
     assert_eq!(stats2.notes_updated, 0);
-    assert_eq!(stats2.notes_unchanged, 9);
+    assert_eq!(stats2.notes_unchanged, 10);
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn path_prefix_filter() {
         )
         .unwrap();
 
-    assert_eq!(results.len(), 3); // rust-async, rust-error-handling, sqlite-fts5
+    assert_eq!(results.len(), 4); // rust-async, rust-error-handling, sqlite-fts5, duplicate-links
     for r in &results {
         assert!(r.path.starts_with("research/"), "unexpected: {}", r.path);
     }
@@ -273,6 +273,19 @@ fn extra_frontmatter_preserved() {
         note.frontmatter.extra.get("priority"),
         Some(&serde_yaml::Value::String("high".to_string()))
     );
+}
+
+#[test]
+fn duplicate_wikilinks_do_not_fail() {
+    let vault = open_test_vault();
+    // The fixture note research/duplicate-links.md references [[rust-async]]
+    // and [[project-alpha]] twice each. Indexing must not fail due to the
+    // UNIQUE(source_id, target) constraint on the links table.
+    vault.index().unwrap();
+
+    let stats = vault.stats().unwrap();
+    assert!(stats.total_notes >= 10, "should include the duplicate-links note");
+    assert!(stats.total_links > 0);
 }
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
