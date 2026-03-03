@@ -22,3 +22,4 @@ Obsidian vault indexer and search CLI, built in Rust.
 - `cargo fmt --check` must pass
 - MSRV: 1.80
 - Edition: 2021
+- Commit messages: conventional-ish, short lowercase subject with bullet-point body listing features and internals. See git log for examples.

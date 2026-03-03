@@ -56,5 +56,10 @@ indicatif = "0.17"
 # Regex
 regex = "1"
 
+# MCP server
+rmcp = { version = "0.17", features = ["server", "transport-io", "transport-streamable-http-server"] }
+schemars = "0.8"
+axum = "0.8"
+
 # Testing
 tempfile = "3"

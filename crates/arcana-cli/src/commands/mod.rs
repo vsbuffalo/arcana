@@ -2,6 +2,7 @@ pub mod create;
 pub mod index;
 pub mod read;
 pub mod search;
+pub mod serve;
 pub mod stats;
 
 use anyhow::Result;
@@ -20,6 +21,8 @@ pub enum Commands {
     Create(create::CreateArgs),
     /// Show vault statistics
     Stats,
+    /// Start the MCP server (for Claude Code / Claude Web)
+    Serve(serve::ServeArgs),
 }
 
 pub trait Run {
@@ -34,6 +37,7 @@ impl Run for Commands {
             Commands::Read(args) => args.run(config, json),
             Commands::Create(args) => args.run(config, json),
             Commands::Stats => stats::run_stats(config, json),
+            Commands::Serve(args) => serve::run_serve(args, config),
         }
     }
 }
