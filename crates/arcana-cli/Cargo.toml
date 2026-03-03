@@ -1,0 +1,20 @@
+[package]
+name = "arcana-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "arcana"
+path = "src/main.rs"
+
+[dependencies]
+arcana-core = { path = "../arcana-core" }
+anyhow.workspace = true
+clap.workspace = true
+colored.workspace = true
+indicatif.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

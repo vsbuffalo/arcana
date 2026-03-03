@@ -1,0 +1,60 @@
+[workspace]
+members = [
+  "crates/arcana-agent",
+  "crates/arcana-cli",
+  "crates/arcana-core",
+  "crates/arcana-server",
+  "crates/arcana-tui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[workspace.dependencies]
+# Serialization
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "2"
+toml = "0.8"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
+
+# File system
+walkdir = "2"
+notify = "7"
+notify-debouncer-mini = "0.5"
+
+# Hashing
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Parallelism
+rayon = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+colored = "3"
+indicatif = "0.17"
+
+# Regex
+regex = "1"
+
+# Testing
+tempfile = "3"

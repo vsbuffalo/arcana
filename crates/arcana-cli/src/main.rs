@@ -1,0 +1,81 @@
+mod commands;
+mod output;
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::Parser;
+use tracing_subscriber::EnvFilter;
+
+use commands::{Commands, Run};
+
+#[derive(Parser)]
+#[command(name = "arcana", about = "Fast Obsidian vault indexer and search")]
+pub struct Cli {
+    /// Path to the vault root directory
+    #[arg(long, global = true, env = "ARCANA_VAULT")]
+    vault: Option<PathBuf>,
+
+    /// Path to config file
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long, global = true, default_value = "warn")]
+    log_level: String,
+
+    /// Output as JSON
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
+        )
+        .with_target(false)
+        .init();
+
+    let vault_path = resolve_vault_path(cli.vault)?;
+
+    let config = if let Some(ref config_path) = cli.config {
+        arcana_core::ArcanaConfig::load(config_path)
+            .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?
+            .with_vault_path(vault_path)
+    } else {
+        arcana_core::ArcanaConfig::default().with_vault_path(vault_path)
+    };
+
+    cli.command.run(config, cli.json)
+}
+
+fn resolve_vault_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    // 1. Explicit --vault flag
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+
+    // 2. ARCANA_VAULT env var (handled by clap env)
+    // If we get here, neither --vault nor env var was set.
+
+    // 3. Walk up from cwd looking for .obsidian/ directory
+    let mut dir = std::env::current_dir()?;
+    loop {
+        if dir.join(".obsidian").is_dir() {
+            return Ok(dir);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+
+    anyhow::bail!(
+        "could not find vault. Use --vault, set ARCANA_VAULT, or run from within an Obsidian vault"
+    )
+}
