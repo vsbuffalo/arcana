@@ -257,22 +257,7 @@ fn format_tool_description(tool_name: &str, input: &serde_json::Value) -> String
     }
 }
 
-fn build_librarian_prompt(taxonomy: Option<&str>, style: Option<&str>) -> String {
-    let mut prompt = String::with_capacity(4096);
-
-    if let Some(tax) = taxonomy {
-        prompt.push_str("<taxonomy>\n");
-        prompt.push_str(tax);
-        prompt.push_str("\n</taxonomy>\n\n");
-    }
-
-    if let Some(sty) = style {
-        prompt.push_str("<style_guide>\n");
-        prompt.push_str(sty);
-        prompt.push_str("\n</style_guide>\n\n");
-    }
-
-    prompt.push_str(r#"You are a librarian for this Obsidian knowledge vault.
+const LIBRARIAN_TASK: &str = r#"You are a librarian for this Obsidian knowledge vault.
 
 ## Conversational style
 - Concise and direct. No filler, no preamble.
@@ -293,9 +278,10 @@ fn build_librarian_prompt(taxonomy: Option<&str>, style: Option<&str>) -> String
 - When the user asks about their vault's contents, search first before answering.
 
 ## Tips for the user
-- Suggest `arcana context "<topic>"` when the user wants to export vault context for use in other tools or conversations"#);
+- Suggest `arcana context "<topic>"` when the user wants to export vault context for use in other tools or conversations"#;
 
-    prompt
+fn build_librarian_prompt(taxonomy: Option<&str>, style: Option<&str>) -> String {
+    crate::prompt::build_system_prompt(taxonomy, style, None, LIBRARIAN_TASK, None)
 }
 
 #[cfg(test)]

@@ -4,6 +4,7 @@ pub mod chat;
 pub mod context;
 pub mod error;
 pub mod permissions;
+pub mod prompt;
 pub mod tools;
 pub mod types;
 
@@ -13,6 +14,7 @@ pub use chat::{ChatResponse, ChatSession};
 pub use context::generate_context;
 pub use error::AgentError;
 pub use permissions::{ApprovalResult, ToolPermission};
+pub use prompt::build_system_prompt;
 pub use tools::{SessionContext, VaultToolExecutor};
 pub use types::{ContentBlock, LlmResponse, Message, StopReason, ToolDef, Usage};
 
