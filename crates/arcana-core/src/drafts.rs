@@ -258,6 +258,12 @@ impl DraftManager {
         }
         self.write_manifest(session_id, &manifest)?;
 
+        // Remove the draft file (same as reject)
+        let draft_path = self.draft_file_path(session_id, rel_path);
+        if draft_path.exists() {
+            fs::remove_file(draft_path)?;
+        }
+
         debug!("approved draft {rel_path} from session {session_id}");
         Ok(target)
     }

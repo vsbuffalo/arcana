@@ -522,7 +522,7 @@ enum Author {
 }
 
 fn git_err(e: git2::Error) -> ArcanaError {
-    ArcanaError::Config(format!("git error: {e}"))
+    ArcanaError::Git(e.to_string())
 }
 
 #[cfg(test)]

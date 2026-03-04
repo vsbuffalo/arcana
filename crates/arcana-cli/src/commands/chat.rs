@@ -45,7 +45,10 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig) -> Result<()> {
         llm_config.model = model.clone();
     }
 
-    let backend = arcana_agent::create_backend(&llm_config)?;
+    let backend = arcana_agent::create_backend(&llm_config)
+        .map_err(|e| anyhow::anyhow!(
+            "{e}\n\nhint: set ANTHROPIC_API_KEY, or use --provider ollama --model <name> for local inference"
+        ))?;
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let agent_config = AgentConfig {

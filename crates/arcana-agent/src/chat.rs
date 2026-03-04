@@ -71,8 +71,7 @@ impl ChatSession {
                 model: self.llm.model_name().to_string(),
                 provider: self.llm.provider_name().to_string(),
             },
-        )
-        .with_permissions(Box::new(chat_permissions));
+        );
 
         let mut total_usage = Usage::default();
         let mut tools_used = Vec::new();
@@ -272,7 +271,10 @@ fn build_librarian_prompt() -> String {
 - When drafting notes, follow the vault's existing conventions for naming, structure, and tagging
 - Link to existing notes with [[wikilinks]] when relevant
 - Be concise and helpful in your responses
-- When the user asks about their vault's contents, search first before answering"#
+- When the user asks about their vault's contents, search first before answering
+
+## Tips for the user
+- Suggest `arcana context "<topic>"` when the user wants to export vault context for use in other tools or conversations"#
         .to_string()
 }
 

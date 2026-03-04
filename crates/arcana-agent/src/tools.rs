@@ -444,6 +444,12 @@ impl VaultToolExecutor {
             vault
                 .reindex_paths(&[full_path])
                 .map_err(|e| e.to_string())?;
+
+            if let Some(git) = vault.git() {
+                let rel = std::path::Path::new(&input.path);
+                git.commit_ai_write(&[rel], &format!("arcana: update {}", input.path))
+                    .map_err(|e| e.to_string())?;
+            }
         } else {
             let fm_patch = Frontmatter {
                 ai: Some(self.build_ai_meta()),
@@ -581,7 +587,7 @@ impl VaultToolExecutor {
         // Check if there's already a session with our session_id
         let sessions = drafts.list_sessions().map_err(|e| e.to_string())?;
         for s in &sessions {
-            if s.id == self.session.session_id[..8.min(self.session.session_id.len())] {
+            if self.session.session_id.starts_with(&s.id) {
                 return Ok(s.id.clone());
             }
         }
