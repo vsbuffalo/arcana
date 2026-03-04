@@ -406,6 +406,7 @@ impl ArcanaServer {
                 provider: "mcp-client".to_string(),
                 model: "unknown".to_string(),
                 task: "draft".to_string(),
+                input_hash: None,
             })
             .map_err(vault_err)?;
 
@@ -464,6 +465,7 @@ impl ArcanaServer {
                 provider: "mcp-client".to_string(),
                 model: "unknown".to_string(),
                 task: "suggest-edit".to_string(),
+                input_hash: None,
             })
             .map_err(vault_err)?;
 

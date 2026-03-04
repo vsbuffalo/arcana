@@ -11,6 +11,7 @@ pub mod review;
 pub mod search;
 pub mod serve;
 pub mod stats;
+pub mod tidy;
 
 use anyhow::Result;
 use arcana_core::ArcanaConfig;
@@ -44,6 +45,8 @@ pub enum Commands {
     Diff(diff::DiffArgs),
     /// Restore a note to a previous version
     Restore(restore::RestoreArgs),
+    /// Tidy inbox notes into structured vault notes using an LLM
+    Tidy(tidy::TidyArgs),
 }
 
 pub trait Run {
@@ -66,6 +69,7 @@ impl Run for Commands {
             Commands::Log(args) => log::run_log(args, config, json),
             Commands::Diff(args) => diff::run_diff(args, config, json),
             Commands::Restore(args) => restore::run_restore(args, config, json),
+            Commands::Tidy(args) => tidy::run_tidy(args, config),
         }
     }
 }

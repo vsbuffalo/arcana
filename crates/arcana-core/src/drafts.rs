@@ -16,6 +16,8 @@ pub struct SessionManifest {
     pub provider: String,
     pub model: String,
     pub task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_hash: Option<String>,
     #[serde(default)]
     pub drafts: Vec<DraftEntry>,
 }
@@ -59,6 +61,7 @@ pub struct SessionInfo {
     pub provider: String,
     pub model: String,
     pub task: String,
+    pub input_hash: Option<String>,
     pub total_drafts: usize,
     pub pending_drafts: usize,
 }
@@ -79,6 +82,7 @@ pub struct SessionMeta {
     pub provider: String,
     pub model: String,
     pub task: String,
+    pub input_hash: Option<String>,
 }
 
 /// Manages AI drafts in `.arcana/drafts/`.
@@ -108,6 +112,7 @@ impl DraftManager {
             provider: meta.provider,
             model: meta.model,
             task: meta.task,
+            input_hash: meta.input_hash,
             drafts: Vec::new(),
         };
 
@@ -198,6 +203,7 @@ impl DraftManager {
                         provider: manifest.provider,
                         model: manifest.model,
                         task: manifest.task,
+                        input_hash: manifest.input_hash,
                         total_drafts: manifest.drafts.len(),
                         pending_drafts: pending,
                     });
@@ -325,6 +331,33 @@ impl DraftManager {
         Ok(pruned)
     }
 
+    /// Find pending sessions that have drafts targeting any of the given paths.
+    ///
+    /// Returns `(session_id, session_info, overlapping_paths)` for each match.
+    pub fn find_conflicts(&self, paths: &[&str]) -> Result<Vec<(String, SessionInfo, Vec<String>)>> {
+        let sessions = self.list_sessions()?;
+        let mut conflicts = Vec::new();
+
+        for session in sessions {
+            if session.pending_drafts == 0 {
+                continue;
+            }
+            let drafts = self.list_drafts(&session.id)?;
+            let overlapping: Vec<String> = drafts
+                .iter()
+                .filter(|d| d.status == DraftStatus::Pending)
+                .filter(|d| paths.contains(&d.path.as_str()))
+                .map(|d| d.path.clone())
+                .collect();
+
+            if !overlapping.is_empty() {
+                conflicts.push((session.id.clone(), session, overlapping));
+            }
+        }
+
+        Ok(conflicts)
+    }
+
     fn draft_file_path(&self, session_id: &str, rel_path: &str) -> PathBuf {
         self.drafts_dir.join(session_id).join(rel_path)
     }
@@ -366,6 +399,7 @@ mod tests {
             provider: "ollama".to_string(),
             model: "qwen:35b".to_string(),
             task: "test task".to_string(),
+            input_hash: None,
         }
     }
 

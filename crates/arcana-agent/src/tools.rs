@@ -599,6 +599,7 @@ impl VaultToolExecutor {
                 provider: self.session.provider.clone(),
                 model: self.session.model.clone(),
                 task: self.session.task.clone(),
+                input_hash: None,
             })
             .map_err(|e| e.to_string())
     }
