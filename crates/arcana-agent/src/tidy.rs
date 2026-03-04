@@ -335,7 +335,7 @@ async fn plan_tidy(
 }
 
 /// Extract JSON from LLM response, stripping markdown code fences if present.
-fn extract_json(text: &str) -> &str {
+pub(crate) fn extract_json(text: &str) -> &str {
     let trimmed = text.trim();
     if let Some(start) = trimmed.find('{') {
         if let Some(end) = trimmed.rfind('}') {
@@ -563,6 +563,7 @@ pub struct TidyResult {
     pub session_id: Option<String>,
     pub drafted_paths: Vec<String>,
     pub usage: Usage,
+    pub cost_estimate: Option<crate::pricing::CostEstimate>,
 }
 
 /// Run the full tidy pipeline: survey → plan → generate → drafts.
@@ -604,15 +605,35 @@ pub async fn run_tidy(
             session_id: None,
             drafted_paths: Vec::new(),
             usage: plan_usage,
+            cost_estimate: None,
         });
     }
 
     if config.plan_only {
+        // Estimate remaining: source material sizes are known from the survey
+        let source_tokens: u64 = sources
+            .iter()
+            .map(|s| s.content.len() as u64 / 4) // ~4 chars per token
+            .sum();
+        let est_input = source_tokens * 2 * plan.output_count() as u64;
+        let est_output = plan.output_count() as u64 * 2000;
+        let estimated_remaining = Usage {
+            input_tokens: est_input,
+            output_tokens: est_output,
+        };
+
+        let cost_estimate = Some(crate::pricing::CostEstimate::new(
+            llm.model_name(),
+            plan_usage.clone(),
+            estimated_remaining,
+        ));
+
         return Ok(TidyResult {
             plan,
             session_id: None,
             drafted_paths: Vec::new(),
             usage: plan_usage,
+            cost_estimate,
         });
     }
 
@@ -703,11 +724,18 @@ pub async fn run_tidy(
         },
     );
 
+    let cost_estimate = Some(crate::pricing::CostEstimate::new(
+        llm.model_name(),
+        total_usage.clone(),
+        Usage::default(),
+    ));
+
     Ok(TidyResult {
         plan,
         session_id: Some(session_id),
         drafted_paths,
         usage: total_usage,
+        cost_estimate,
     })
 }
 

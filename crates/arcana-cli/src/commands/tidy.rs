@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use arcana_agent::{TidyConfig, TidyEvent, TidyPlan};
+use arcana_agent::{CostEstimate, TidyConfig, TidyEvent, TidyPlan};
 use arcana_core::{ArcanaConfig, SearchFilters, SearchResult};
 use clap::Args;
 use colored::Colorize;
@@ -91,7 +91,11 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig) -> Result<()> {
 
     let tidy_config = TidyConfig {
         plan_only: args.plan_only,
-        ..Default::default()
+        max_tokens: config
+            .agent
+            .tidy
+            .max_tokens
+            .unwrap_or(config.agent.max_tokens) as u64,
     };
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -214,6 +218,9 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig) -> Result<()> {
                         result.usage.input_tokens,
                         result.usage.output_tokens
                     );
+                    if let Some(ref est) = result.cost_estimate {
+                        print_cost_estimate(est);
+                    }
                 } else if let Some(ref session_id) = result.session_id {
                     // Print full paths to draft files for easy access
                     let drafts_dir = config
@@ -309,6 +316,43 @@ fn resolve_targets(vault: &arcana_core::Vault, args: &TidyArgs) -> Result<Vec<St
     };
     let results: Vec<SearchResult> = vault.list(&filters, 200)?;
     Ok(results.into_iter().map(|r| r.path).collect())
+}
+
+fn print_cost_estimate(est: &CostEstimate) {
+    eprintln!();
+    eprintln!(
+        "  {} ({}, pricing as of {}):",
+        "cost".bold(),
+        est.model.cyan(),
+        arcana_agent::pricing::LAST_UPDATED.dimmed()
+    );
+    eprintln!(
+        "    spent so far:        {}K in / {}K out    {}",
+        est.spent.input_tokens / 1000,
+        est.spent.output_tokens / 1000,
+        est.spent_cost
+            .map(|c| format!("→  ${:.2}", c))
+            .unwrap_or_default()
+            .dimmed()
+    );
+    if est.estimated_remaining.total() > 0 {
+        eprintln!(
+            "    estimated remaining: {}K in / {}K out    {}",
+            est.estimated_remaining.input_tokens / 1000,
+            est.estimated_remaining.output_tokens / 1000,
+            est.remaining_cost
+                .map(|c| format!("→  ${:.2}", c))
+                .unwrap_or_default()
+                .dimmed()
+        );
+        if let Some(total) = est.total_cost {
+            eprintln!(
+                "    {}                         {}",
+                "estimated total:".bold(),
+                format!("→  ~${:.2}", total).dimmed()
+            );
+        }
+    }
 }
 
 fn print_plan(plan: &TidyPlan) {

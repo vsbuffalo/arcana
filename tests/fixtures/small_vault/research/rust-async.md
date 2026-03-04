@@ -6,6 +6,7 @@ tags:
   - async
 created: 2024-01-15T10:00:00Z
 ---
+
 # Rust Async Programming
 
 Async/await in Rust is built on top of futures. The `tokio` runtime is the most popular choice.

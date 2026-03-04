@@ -6,6 +6,7 @@ tags:
 custom_field: some-value
 priority: high
 ---
+
 # Project Beta
 
 A future project with custom frontmatter fields.

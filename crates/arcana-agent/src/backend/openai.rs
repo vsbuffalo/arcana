@@ -11,36 +11,36 @@ pub struct OpenAiBackend {
     base_url: String,
     api_key: Option<String>,
     model: String,
+    max_output_tokens: u32,
     provider: String,
     client: reqwest::Client,
 }
 
 impl OpenAiBackend {
-    pub fn new(base_url: String, api_key: Option<String>, model: String, provider: String) -> Self {
+    pub fn new(
+        base_url: String,
+        api_key: Option<String>,
+        model: String,
+        provider: String,
+        max_output_tokens: u32,
+    ) -> Self {
         Self {
             base_url,
             api_key,
             model,
+            max_output_tokens,
             provider,
             client: reqwest::Client::new(),
         }
     }
 
-    pub fn new_openai(api_key: String, model: Option<String>) -> Self {
-        Self::new(
-            "https://api.openai.com/v1".into(),
-            Some(api_key),
-            model.unwrap_or_else(|| "gpt-4o".into()),
-            "openai".into(),
-        )
-    }
-
-    pub fn new_ollama(endpoint: Option<String>, model: String) -> Self {
+    pub fn new_ollama(endpoint: Option<String>, model: String, max_output_tokens: u32) -> Self {
         Self::new(
             endpoint.unwrap_or_else(|| "http://localhost:11434/v1".into()),
             None,
             model,
             "ollama".into(),
+            max_output_tokens,
         )
     }
 }
@@ -52,6 +52,7 @@ impl OpenAiBackend {
 #[derive(Serialize)]
 struct ApiRequest {
     model: String,
+    max_tokens: u32,
     messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
@@ -313,6 +314,7 @@ impl LlmBackend for OpenAiBackend {
 
         let body = ApiRequest {
             model: self.model.clone(),
+            max_tokens: self.max_output_tokens,
             messages: api_messages,
             tools: api_tools,
         };

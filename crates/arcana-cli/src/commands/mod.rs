@@ -4,6 +4,7 @@ pub mod context;
 pub mod create;
 pub mod diff;
 pub mod index;
+pub mod ingest;
 pub mod log;
 pub mod read;
 pub mod restore;
@@ -48,6 +49,8 @@ pub enum Commands {
     Restore(restore::RestoreArgs),
     /// Tidy inbox notes into structured vault notes using an LLM
     Tidy(tidy::TidyArgs),
+    /// Ingest an external project into vault notes using an LLM
+    Ingest(ingest::IngestArgs),
     /// List available skills from .arcana/skills/
     Skills(skills::SkillsArgs),
 }
@@ -73,6 +76,7 @@ impl Run for Commands {
             Commands::Diff(args) => diff::run_diff(args, config, json),
             Commands::Restore(args) => restore::run_restore(args, config, json),
             Commands::Tidy(args) => tidy::run_tidy(args, config),
+            Commands::Ingest(args) => ingest::run_ingest(args, config),
             Commands::Skills(args) => skills::run_skills(args, config, json),
         }
     }

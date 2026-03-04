@@ -3,7 +3,9 @@ pub mod backend;
 pub mod chat;
 pub mod context;
 pub mod error;
+pub mod ingest;
 pub mod permissions;
+pub mod pricing;
 pub mod project_tools;
 pub mod prompt;
 pub mod tidy;
@@ -18,6 +20,8 @@ pub use error::AgentError;
 pub use permissions::{ApprovalResult, ToolPermission};
 pub use project_tools::ProjectToolExecutor;
 pub use prompt::build_system_prompt;
+pub use ingest::{run_ingest, IngestConfig, IngestEvent, IngestPlan, IngestResult};
+pub use pricing::CostEstimate;
 pub use tidy::{run_tidy, TidyConfig, TidyEvent, TidyPlan, TidyResult};
 pub use tools::{SessionContext, VaultToolExecutor};
 pub use types::{ContentBlock, LlmResponse, Message, StopReason, ToolDef, Usage};
@@ -26,12 +30,15 @@ use arcana_core::LlmConfig;
 
 /// Create an LLM backend from config. Resolves the API key from environment.
 pub fn create_backend(config: &LlmConfig) -> error::Result<Box<dyn LlmBackend>> {
+    let max_output_tokens = config.max_output_tokens.unwrap_or(8192);
+
     match config.provider.as_str() {
         "anthropic" => {
             let api_key = resolve_api_key(&config.api_key_env)?;
             Ok(Box::new(backend::anthropic::AnthropicBackend::new(
                 api_key,
                 Some(config.model.clone()),
+                max_output_tokens,
             )))
         }
         "openai" => {
@@ -44,11 +51,13 @@ pub fn create_backend(config: &LlmConfig) -> error::Result<Box<dyn LlmBackend>> 
                 Some(api_key),
                 config.model.clone(),
                 "openai".into(),
+                max_output_tokens,
             )))
         }
         "ollama" => Ok(Box::new(backend::openai::OpenAiBackend::new_ollama(
             config.endpoint.clone(),
             config.model.clone(),
+            max_output_tokens,
         ))),
         other => Err(AgentError::Config(format!(
             "unknown llm provider: '{other}' (expected 'anthropic', 'openai', or 'ollama')"

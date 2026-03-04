@@ -12,7 +12,10 @@ pub mod vault;
 pub mod watcher;
 pub mod writer;
 
-pub use config::{AgentSettings, ArcanaConfig, DraftsConfig, GitConfig, LlmConfig};
+pub use config::{
+    global_config_path, load_merged, AgentSettings, ArcanaConfig, DraftsConfig, GitConfig,
+    LlmConfig, OperationOverrides,
+};
 pub use drafts::{DraftInfo, DraftKind, DraftManager, DraftStatus, SessionInfo, SessionMeta};
 pub use errors::{ArcanaError, Result};
 pub use git::{CommitInfo, InitInfo, LineProvenance, NoteProvenance, ProvenanceAuthor, VaultGit};

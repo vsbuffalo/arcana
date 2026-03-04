@@ -7,11 +7,13 @@ aliases:
   - alpha
   - main-project
 ---
+
 # Project Alpha
 
 The main project we're working on. Uses Rust with async/await.
 
 ## Stack
+
 - Rust + Tokio
 - SQLite for storage
 - FTS5 for search

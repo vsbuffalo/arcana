@@ -12,14 +12,16 @@ const MAX_RETRIES: u32 = 3;
 pub struct AnthropicBackend {
     api_key: String,
     model: String,
+    max_output_tokens: u32,
     client: reqwest::Client,
 }
 
 impl AnthropicBackend {
-    pub fn new(api_key: String, model: Option<String>) -> Self {
+    pub fn new(api_key: String, model: Option<String>, max_output_tokens: u32) -> Self {
         Self {
             api_key,
             model: model.unwrap_or_else(|| "claude-sonnet-4-5-20250929".into()),
+            max_output_tokens,
             client: reqwest::Client::new(),
         }
     }
@@ -193,7 +195,7 @@ impl LlmBackend for AnthropicBackend {
 
         let body = ApiRequest {
             model: &self.model,
-            max_tokens: 8192,
+            max_tokens: self.max_output_tokens,
             system,
             messages: api_messages,
             tools: api_tools,

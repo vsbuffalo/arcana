@@ -59,20 +59,30 @@ fn main() -> Result<()> {
     let vault_path = resolve_vault_path(cli.vault)?;
 
     let config = if let Some(ref config_path) = cli.config {
+        // Explicit --config: use only that file (no merge)
         arcana_core::ArcanaConfig::load(config_path)
             .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?
             .with_vault_path(vault_path)
     } else {
-        // Auto-discover .arcana/config.toml in the vault
-        let auto_path = vault_path.join(".arcana").join("config.toml");
-        if auto_path.is_file() {
-            tracing::debug!("loading config from {}", auto_path.display());
-            arcana_core::ArcanaConfig::load(&auto_path)
-                .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?
-                .with_vault_path(vault_path)
-        } else {
-            arcana_core::ArcanaConfig::default().with_vault_path(vault_path)
+        // Merge: compiled defaults → global → vault-local
+        let global_path = arcana_core::global_config_path();
+        let vault_local = vault_path.join(".arcana").join("config.toml");
+
+        if let Some(ref gp) = global_path {
+            if gp.is_file() {
+                tracing::debug!("loading global config from {}", gp.display());
+            }
         }
+        if vault_local.is_file() {
+            tracing::debug!("loading vault config from {}", vault_local.display());
+        }
+
+        arcana_core::load_merged(
+            global_path.as_deref(),
+            Some(&vault_local),
+        )
+        .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?
+        .with_vault_path(vault_path)
     };
 
     let mut config = config;

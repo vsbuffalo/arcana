@@ -101,6 +101,7 @@ arcana read "some/note.md" --json
 ## How it finds your vault
 
 In order of priority:
+
 1. `--vault /explicit/path`
 2. `ARCANA_VAULT` env var
 3. Walk up from `cwd` looking for `.obsidian/` (this is why `cd`-ing into your vault just works)
@@ -138,14 +139,14 @@ Then configure your MCP client to connect to `http://localhost:8080/mcp`.
 
 ### Available tools
 
-| Tool | Description |
-|------|-------------|
+| Tool           | Description                                       |
+| -------------- | ------------------------------------------------- |
 | `vault_search` | Full-text search with filters (tags, path prefix) |
-| `vault_read` | Read a note's full content |
-| `vault_create` | Create a new note with title, tags, body |
-| `vault_update` | Update body, append text, add/remove tags |
-| `vault_list` | List notes with optional filters |
-| `vault_stats` | Get vault statistics (notes, tags, links) |
+| `vault_read`   | Read a note's full content                        |
+| `vault_create` | Create a new note with title, tags, body          |
+| `vault_update` | Update body, append text, add/remove tags         |
+| `vault_list`   | List notes with optional filters                  |
+| `vault_stats`  | Get vault statistics (notes, tags, links)         |
 
 ## For development
 

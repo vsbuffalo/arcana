@@ -5,6 +5,7 @@ tags:
   - sqlite
   - search
 ---
+
 # SQLite FTS5
 
 FTS5 is SQLite's full-text search extension. It provides fast keyword search with ranking.

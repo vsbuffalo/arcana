@@ -4,6 +4,7 @@ tags:
   - meta
   - getting-started
 ---
+
 # Welcome
 
 This is the welcome note for the vault. It contains important information about how to use this knowledge base.

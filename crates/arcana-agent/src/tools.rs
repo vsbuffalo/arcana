@@ -61,6 +61,11 @@ impl VaultToolExecutor {
         Self::base_tool_defs()
     }
 
+    /// Read-only tool defs for ingest exploration (no create/update/draft).
+    pub fn read_only_tool_defs() -> Vec<ToolDef> {
+        vec![Self::search_def(), Self::read_def(), Self::list_def()]
+    }
+
     /// Tool defs including draft tools (for chat mode).
     pub fn chat_tool_defs() -> Vec<ToolDef> {
         let defs = vec![

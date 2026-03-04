@@ -5,6 +5,7 @@ tags:
   - programming
   - error-handling
 ---
+
 # Rust Error Handling
 
 The `Result<T, E>` type is the primary mechanism for recoverable errors in Rust.
