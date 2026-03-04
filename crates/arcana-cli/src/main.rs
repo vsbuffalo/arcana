@@ -28,6 +28,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Git author name
+    #[arg(long, global = true, env = "ARCANA_USER_NAME")]
+    name: Option<String>,
+
+    /// Git author email
+    #[arg(long, global = true, env = "ARCANA_USER_EMAIL")]
+    email: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -66,6 +74,14 @@ fn main() -> Result<()> {
             arcana_core::ArcanaConfig::default().with_vault_path(vault_path)
         }
     };
+
+    let mut config = config;
+    if let Some(name) = cli.name {
+        config.git.user_name = name;
+    }
+    if let Some(email) = cli.email {
+        config.git.user_email = email;
+    }
 
     cli.command.run(config, cli.json)
 }

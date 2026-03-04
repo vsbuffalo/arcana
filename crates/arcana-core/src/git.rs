@@ -9,6 +9,33 @@ use tracing::{debug, info};
 use crate::config::GitConfig;
 use crate::errors::{ArcanaError, Result};
 
+const IDENTITY_ERROR: &str = "\
+git user identity not configured. Fix with any of:
+
+  arcana --name \"Your Name\" --email \"you@example.com\" ...
+
+  export ARCANA_USER_NAME=\"Your Name\"
+  export ARCANA_USER_EMAIL=\"you@example.com\"
+
+  # .arcana/config.toml
+  [git]
+  user_name = \"Your Name\"
+  user_email = \"you@example.com\"
+
+  git config --global user.name \"Your Name\"
+  git config --global user.email \"you@example.com\"";
+
+/// Check that a human identity is available from either git config or the arcana config.
+fn check_identity(repo: &Repository, config: &GitConfig) -> Result<()> {
+    if repo.signature().is_ok() {
+        return Ok(());
+    }
+    if !config.user_name.is_empty() && !config.user_email.is_empty() {
+        return Ok(());
+    }
+    Err(ArcanaError::Config(IDENTITY_ERROR.to_string()))
+}
+
 /// Provenance author identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -103,21 +130,13 @@ impl VaultGit {
                     )?;
                 }
 
+                // Validate identity before first commit
+                check_identity(&repo, config)?;
+
                 // Initial commit
                 let sig = repo.signature().unwrap_or_else(|_| {
-                    Signature::now(
-                        if config.user_name.is_empty() {
-                            "arcana"
-                        } else {
-                            &config.user_name
-                        },
-                        if config.user_email.is_empty() {
-                            "arcana@local"
-                        } else {
-                            &config.user_email
-                        },
-                    )
-                    .expect("valid signature")
+                    Signature::now(&config.user_name, &config.user_email)
+                        .expect("valid signature (already validated)")
                 });
 
                 {
@@ -175,7 +194,7 @@ impl VaultGit {
                 index.write().map_err(git_err)?;
                 let tree_oid = index.write_tree().map_err(git_err)?;
                 let tree = git.repo.find_tree(tree_oid).map_err(git_err)?;
-                let sig = git.human_signature().map_err(git_err)?;
+                let sig = git.human_signature()?;
                 let parent = git.repo.head().ok().and_then(|h| h.peel_to_commit().ok());
                 let parents: Vec<&git2::Commit<'_>> = parent.as_ref().into_iter().collect();
                 let msg = format!("arcana: adopt {count} existing notes");
@@ -194,21 +213,16 @@ impl VaultGit {
         Signature::now(&self.config.ai_name, &self.config.ai_email)
     }
 
-    fn human_signature(&self) -> std::result::Result<Signature<'_>, git2::Error> {
+    fn human_signature(&self) -> Result<Signature<'_>> {
         // Try git config first, then fall back to configured values
-        self.repo.signature().or_else(|_| {
-            let name = if self.config.user_name.is_empty() {
-                "vault-owner"
-            } else {
-                &self.config.user_name
-            };
-            let email = if self.config.user_email.is_empty() {
-                "owner@local"
-            } else {
-                &self.config.user_email
-            };
-            Signature::now(name, email)
-        })
+        if let Ok(sig) = self.repo.signature() {
+            return Ok(sig);
+        }
+        if !self.config.user_name.is_empty() && !self.config.user_email.is_empty() {
+            return Signature::now(&self.config.user_name, &self.config.user_email)
+                .map_err(git_err);
+        }
+        Err(ArcanaError::Config(IDENTITY_ERROR.to_string()))
     }
 
     /// Stage and commit paths as an AI write.
@@ -301,7 +315,7 @@ impl VaultGit {
 
         let sig = match author {
             Author::Ai => self.ai_signature().map_err(git_err)?,
-            Author::Human => self.human_signature().map_err(git_err)?,
+            Author::Human => self.human_signature()?,
         };
 
         let parent = self.repo.head().ok().and_then(|h| h.peel_to_commit().ok());
@@ -543,6 +557,29 @@ mod tests {
         let log = git.log(None, 10).unwrap();
         assert_eq!(log.len(), 1);
         assert!(log[0].message.contains("init vault"));
+    }
+
+    #[test]
+    fn open_or_init_errors_without_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = GitConfig {
+            enabled: true,
+            auto_commit: true,
+            user_name: String::new(),
+            user_email: String::new(),
+            ai_name: "arcana-ai".to_string(),
+            ai_email: "ai@arcana.local".to_string(),
+        };
+        match VaultGit::open_or_init(dir.path(), &config) {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("git user identity"),
+                    "expected identity error, got: {msg}"
+                );
+            }
+            Ok(_) => panic!("expected error for missing identity, got Ok"),
+        }
     }
 
     #[test]
