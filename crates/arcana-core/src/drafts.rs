@@ -334,7 +334,10 @@ impl DraftManager {
     /// Find pending sessions that have drafts targeting any of the given paths.
     ///
     /// Returns `(session_id, session_info, overlapping_paths)` for each match.
-    pub fn find_conflicts(&self, paths: &[&str]) -> Result<Vec<(String, SessionInfo, Vec<String>)>> {
+    pub fn find_conflicts(
+        &self,
+        paths: &[&str],
+    ) -> Result<Vec<(String, SessionInfo, Vec<String>)>> {
         let sessions = self.list_sessions()?;
         let mut conflicts = Vec::new();
 

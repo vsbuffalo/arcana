@@ -10,6 +10,7 @@ pub mod restore;
 pub mod review;
 pub mod search;
 pub mod serve;
+pub mod skills;
 pub mod stats;
 pub mod tidy;
 
@@ -47,6 +48,8 @@ pub enum Commands {
     Restore(restore::RestoreArgs),
     /// Tidy inbox notes into structured vault notes using an LLM
     Tidy(tidy::TidyArgs),
+    /// List available skills from .arcana/skills/
+    Skills(skills::SkillsArgs),
 }
 
 pub trait Run {
@@ -70,6 +73,7 @@ impl Run for Commands {
             Commands::Diff(args) => diff::run_diff(args, config, json),
             Commands::Restore(args) => restore::run_restore(args, config, json),
             Commands::Tidy(args) => tidy::run_tidy(args, config),
+            Commands::Skills(args) => skills::run_skills(args, config, json),
         }
     }
 }

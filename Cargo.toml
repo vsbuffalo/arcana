@@ -26,8 +26,8 @@ thiserror = "2"
 toml = "0.8"
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
 
 # HTTP client
 reqwest = { version = "0.12", features = ["json"] }
@@ -43,10 +43,11 @@ uuid = { version = "1", features = ["v4"] }
 rusqlite = { version = "0.32", features = ["bundled", "vtab"] }
 
 # File system
-walkdir = "2"
 git2 = { version = "0.19", features = ["vendored-openssl"] }
+globset = "0.4"
 notify = "7"
 notify-debouncer-mini = "0.5"
+walkdir = "2"
 
 # Hashing
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
@@ -67,9 +68,9 @@ similar = "2"
 regex = "1"
 
 # MCP server
+axum = "0.8"
 rmcp = { version = "0.17", features = ["server", "transport-io", "transport-streamable-http-server"] }
 schemars = "0.8"
-axum = "0.8"
 
 # Testing
 tempfile = "3"

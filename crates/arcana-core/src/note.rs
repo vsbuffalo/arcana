@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 
 use crate::errors::{ArcanaError, Result};
+use crate::frontmatter::split_frontmatter;
 
 #[derive(Debug, Clone)]
 pub struct Note {
@@ -66,7 +67,7 @@ pub struct FileMeta {
 
 impl Note {
     pub fn parse(path: PathBuf, content: &str, file_meta: FileMeta) -> Result<Self> {
-        let (frontmatter, body) = split_frontmatter(content)?;
+        let (frontmatter, body) = parse_frontmatter(content)?;
         Ok(Note {
             path,
             frontmatter,
@@ -105,40 +106,14 @@ impl std::fmt::Display for Note {
     }
 }
 
-fn split_frontmatter(content: &str) -> Result<(Frontmatter, String)> {
-    let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
-        return Ok((Frontmatter::default(), content.to_string()));
-    }
+fn parse_frontmatter(content: &str) -> Result<(Frontmatter, String)> {
+    let (yaml, body) = split_frontmatter(content);
 
-    // Find the closing ---
-    let after_open = &trimmed[3..];
-    let after_open = after_open.strip_prefix('\n').unwrap_or(after_open);
-
-    // Handle empty frontmatter: "---\n---\n" → after_open starts with "---"
-    let (yaml_str, body) = if let Some(rest) = after_open.strip_prefix("---") {
-        let body = rest.strip_prefix('\n').unwrap_or(rest).to_string();
-        ("", body)
-    } else if let Some(end) = after_open.find("\n---") {
-        let yaml_str = &after_open[..end];
-        let body_start = end + 4; // skip \n---
-        let body = if body_start < after_open.len() {
-            let rest = &after_open[body_start..];
-            rest.strip_prefix('\n').unwrap_or(rest).to_string()
-        } else {
-            String::new()
-        };
-        (yaml_str, body)
-    } else {
-        // No closing ---, treat entire content as body
-        return Ok((Frontmatter::default(), content.to_string()));
-    };
-
-    if yaml_str.trim().is_empty() {
+    if yaml.is_empty() {
         return Ok((Frontmatter::default(), body));
     }
 
-    match serde_yaml::from_str::<Frontmatter>(yaml_str) {
+    match serde_yaml::from_str::<Frontmatter>(&yaml) {
         Ok(fm) => Ok((fm, body)),
         Err(e) => Err(ArcanaError::InvalidFrontmatter(e.to_string())),
     }

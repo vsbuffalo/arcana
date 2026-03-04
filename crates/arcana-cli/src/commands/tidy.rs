@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -29,9 +28,6 @@ pub struct TidyArgs {
     #[arg(long)]
     pub model: Option<String>,
 
-    /// Domain skill file (optional, for specialized extraction)
-    #[arg(long)]
-    pub skill: Option<PathBuf>,
 }
 
 pub fn run_tidy(args: TidyArgs, config: ArcanaConfig) -> Result<()> {
@@ -68,15 +64,6 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig) -> Result<()> {
             "{e}\n\nhint: set ANTHROPIC_API_KEY, or use --provider ollama --model <name> for local inference"
         )
     })?;
-
-    // Load optional domain skill
-    let skill_content = if let Some(skill_path) = &args.skill {
-        Some(std::fs::read_to_string(skill_path).map_err(|e| {
-            anyhow::anyhow!("failed to read skill file {}: {e}", skill_path.display())
-        })?)
-    } else {
-        None
-    };
 
     let profile = vault.profile().clone();
 
@@ -174,13 +161,12 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig) -> Result<()> {
                     TidyEvent::GenerateDone { .. } => {
                         eprintln!("{}", "done".green());
                     }
-                    TidyEvent::Done { ref session_id, ref usage } => {
+                    TidyEvent::Done {
+                        ref session_id,
+                        ref usage,
+                    } => {
                         eprintln!();
-                        eprintln!(
-                            "  {} session: {}",
-                            "✓".green().bold(),
-                            session_id.cyan()
-                        );
+                        eprintln!("  {} session: {}", "✓".green().bold(), session_id.cyan());
                         eprintln!(
                             "  {} tokens: {} in / {} out",
                             "✓".green().bold(),
@@ -206,7 +192,7 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig) -> Result<()> {
             vault,
             target_paths,
             &profile,
-            skill_content.as_deref(),
+            None,
             &tidy_config,
             Some(&event_tx),
         )
@@ -221,10 +207,7 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig) -> Result<()> {
                     eprintln!("  {} nothing to tidy", "→".dimmed());
                 } else if args.plan_only {
                     eprintln!();
-                    eprintln!(
-                        "  {} plan-only mode, no drafts created",
-                        "→".dimmed()
-                    );
+                    eprintln!("  {} plan-only mode, no drafts created", "→".dimmed());
                     eprintln!(
                         "  {} tokens: {} in / {} out",
                         "✓".green().bold(),
@@ -233,7 +216,9 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig) -> Result<()> {
                     );
                 } else if let Some(ref session_id) = result.session_id {
                     // Print full paths to draft files for easy access
-                    let drafts_dir = config.vault.path
+                    let drafts_dir = config
+                        .vault
+                        .path
                         .join(".arcana")
                         .join("drafts")
                         .join(session_id);
@@ -349,11 +334,7 @@ fn print_plan(plan: &TidyPlan) {
                 ..
             } => {
                 eprintln!("  {} {} {}", from.dimmed(), "→".dimmed(), to.cyan());
-                eprintln!(
-                    "    {} \"{}\"",
-                    title.bold(),
-                    summary.dimmed()
-                );
+                eprintln!("    {} \"{}\"", title.bold(), summary.dimmed());
             }
             TidyAction::Split { from, notes } => {
                 eprintln!(
@@ -363,11 +344,7 @@ fn print_plan(plan: &TidyPlan) {
                     "SPLIT".yellow().bold()
                 );
                 for note in notes {
-                    eprintln!(
-                        "    {} \"{}\"",
-                        note.path.cyan(),
-                        note.summary.dimmed()
-                    );
+                    eprintln!("    {} \"{}\"", note.path.cyan(), note.summary.dimmed());
                 }
             }
             TidyAction::ExtractConcept { from, concept } => {

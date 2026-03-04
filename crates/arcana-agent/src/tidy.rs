@@ -39,10 +39,16 @@ impl Default for TidyConfig {
 
 #[derive(Debug, Clone)]
 pub enum TidyEvent {
-    SurveyStart { count: usize },
-    SurveyNote { path: String },
+    SurveyStart {
+        count: usize,
+    },
+    SurveyNote {
+        path: String,
+    },
     PlanStart,
-    PlanReady { plan: TidyPlan },
+    PlanReady {
+        plan: TidyPlan,
+    },
     ConflictWarning {
         path: String,
         existing_session: String,
@@ -52,11 +58,24 @@ pub enum TidyEvent {
         existing_session: String,
         existing_model: String,
     },
-    GenerateStart { total: usize },
-    GenerateNote { index: usize, path: String },
-    GenerateDone { index: usize, path: String },
-    Done { session_id: String, usage: Usage },
-    Error { message: String },
+    GenerateStart {
+        total: usize,
+    },
+    GenerateNote {
+        index: usize,
+        path: String,
+    },
+    GenerateDone {
+        index: usize,
+        path: String,
+    },
+    Done {
+        session_id: String,
+        usage: Usage,
+    },
+    Error {
+        message: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -87,10 +106,7 @@ pub enum TidyAction {
         notes: Vec<PlannedNote>,
     },
     /// Extract a concept from a note (original stays, concept is new).
-    ExtractConcept {
-        from: String,
-        concept: PlannedNote,
-    },
+    ExtractConcept { from: String, concept: PlannedNote },
 }
 
 /// A note that will be generated.
@@ -182,16 +198,9 @@ fn survey(
     let mut search_terms = Vec::new();
 
     for path in target_paths {
-        send_event(
-            event_tx,
-            TidyEvent::SurveyNote {
-                path: path.clone(),
-            },
-        );
+        send_event(event_tx, TidyEvent::SurveyNote { path: path.clone() });
 
-        let note = vault
-            .read_note(path)
-            .map_err(AgentError::Vault)?;
+        let note = vault.read_note(path).map_err(AgentError::Vault)?;
 
         // Extract keywords for vault context search
         let title = note.title().to_string();
@@ -301,9 +310,7 @@ async fn plan_tidy(
         },
     );
 
-    let response = llm
-        .chat(&system, &[Message::user(user_msg)], &[])
-        .await?;
+    let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
 
     let text = response.text();
     debug!("plan response: {}", &text[..text.len().min(500)]);
@@ -322,12 +329,7 @@ async fn plan_tidy(
         plan.output_count()
     );
 
-    send_event(
-        event_tx,
-        TidyEvent::PlanReady {
-            plan: plan.clone(),
-        },
-    );
+    send_event(event_tx, TidyEvent::PlanReady { plan: plan.clone() });
 
     Ok((plan, response.usage))
 }
@@ -451,12 +453,7 @@ async fn generate_notes(
     session_id: &str,
     event_tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
 ) -> Result<(Vec<String>, Usage)> {
-    send_event(
-        event_tx,
-        TidyEvent::GenerateStart {
-            total: tasks.len(),
-        },
-    );
+    send_event(event_tx, TidyEvent::GenerateStart { total: tasks.len() });
 
     let mut total_usage = Usage::default();
     let mut drafted_paths = Vec::new();
@@ -498,9 +495,7 @@ async fn generate_notes(
             },
         );
 
-        let response = llm
-            .chat(&system, &[Message::user(user_msg)], &[])
-            .await?;
+        let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
         total_usage.accumulate(&response.usage);
 
         let raw = response.text();
@@ -593,8 +588,15 @@ pub async fn run_tidy(
     }
 
     // Phase 2: Plan
-    let (plan, plan_usage) =
-        plan_tidy(llm, &sources, &vault_context, profile, domain_skill, event_tx).await?;
+    let (plan, plan_usage) = plan_tidy(
+        llm,
+        &sources,
+        &vault_context,
+        profile,
+        domain_skill,
+        event_tx,
+    )
+    .await?;
 
     if plan.actions.is_empty() {
         return Ok(TidyResult {
@@ -634,10 +636,7 @@ pub async fn run_tidy(
                             event_tx,
                             TidyEvent::SameInputWarning {
                                 existing_session: session.id.clone(),
-                                existing_model: format!(
-                                    "{}/{}",
-                                    session.provider, session.model
-                                ),
+                                existing_model: format!("{}/{}", session.provider, session.model),
                             },
                         );
                     }
@@ -716,10 +715,7 @@ pub async fn run_tidy(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn send_event(
-    tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
-    event: TidyEvent,
-) {
+fn send_event(tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>, event: TidyEvent) {
     if let Some(tx) = tx {
         let _ = tx.send(event);
     }
@@ -918,7 +914,10 @@ mod tests {
 
         assert_eq!(result.plan.output_count(), 1);
         assert!(result.session_id.is_some());
-        assert_eq!(result.drafted_paths, vec!["concepts/interior-mutability.md"]);
+        assert_eq!(
+            result.drafted_paths,
+            vec!["concepts/interior-mutability.md"]
+        );
         assert_eq!(result.usage.input_tokens, 900);
         assert_eq!(result.usage.output_tokens, 300);
     }
@@ -977,9 +976,15 @@ mod tests {
         assert!(result.session_id.is_some());
         // Should have: SurveyStart, SurveyNote, PlanStart, PlanReady,
         //              GenerateStart, GenerateNote, GenerateDone, Done
-        assert!(events.iter().any(|e| matches!(e, TidyEvent::SurveyStart { .. })));
-        assert!(events.iter().any(|e| matches!(e, TidyEvent::PlanReady { .. })));
-        assert!(events.iter().any(|e| matches!(e, TidyEvent::GenerateStart { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TidyEvent::SurveyStart { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TidyEvent::PlanReady { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, TidyEvent::GenerateStart { .. })));
         assert!(events.iter().any(|e| matches!(e, TidyEvent::Done { .. })));
     }
 }

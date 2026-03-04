@@ -9,6 +9,8 @@ rust-version.workspace = true
 arcana-core = { path = "../arcana-core" }
 async-trait.workspace = true
 chrono.workspace = true
+globset.workspace = true
+regex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -16,6 +18,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+walkdir.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
