@@ -20,9 +20,15 @@ pub use error::AgentError;
 pub use permissions::{ApprovalResult, ToolPermission};
 pub use project_tools::ProjectToolExecutor;
 pub use prompt::build_system_prompt;
-pub use ingest::{run_ingest, IngestConfig, IngestEvent, IngestPlan, IngestResult};
+pub use ingest::{
+    run_ingest, ExploreResult, GenerateResult, IngestConfig, IngestEngine, IngestEvent,
+    IngestPlan, IngestResult, PlanResult,
+};
 pub use pricing::CostEstimate;
-pub use tidy::{run_tidy, TidyConfig, TidyEvent, TidyPlan, TidyResult};
+pub use tidy::{
+    run_tidy, SourceNote, SurveyResult, TidyConfig, TidyEngine, TidyEvent, TidyGenerateResult,
+    TidyPlan, TidyPlanResult, TidyResult,
+};
 pub use tools::{SessionContext, VaultToolExecutor};
 pub use types::{ContentBlock, LlmResponse, Message, StopReason, ToolDef, Usage};
 

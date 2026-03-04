@@ -21,8 +21,6 @@ use crate::types::{ContentBlock, Message, StopReason, ToolDef, Usage};
 // ---------------------------------------------------------------------------
 
 pub struct IngestConfig {
-    /// Only show the plan, don't generate drafts.
-    pub plan_only: bool,
     /// Maximum exploration iterations (tool-use rounds).
     pub max_explore_iterations: usize,
     /// Maximum tokens across the entire pipeline.
@@ -32,7 +30,6 @@ pub struct IngestConfig {
 impl Default for IngestConfig {
     fn default() -> Self {
         Self {
-            plan_only: false,
             max_explore_iterations: 20,
             max_tokens: 200_000,
         }
@@ -77,7 +74,28 @@ pub struct PlannedNote {
 }
 
 // ---------------------------------------------------------------------------
-// Result
+// Phase result types
+// ---------------------------------------------------------------------------
+
+pub struct ExploreResult {
+    pub summary: String,
+    pub usage: Usage,
+}
+
+pub struct PlanResult {
+    pub plan: IngestPlan,
+    pub usage: Usage,
+    pub estimated_gen: Usage,
+}
+
+pub struct GenerateResult {
+    pub session_id: String,
+    pub drafted_paths: Vec<String>,
+    pub usage: Usage,
+}
+
+// ---------------------------------------------------------------------------
+// Result (for convenience wrapper)
 // ---------------------------------------------------------------------------
 
 pub struct IngestResult {
@@ -85,7 +103,6 @@ pub struct IngestResult {
     pub session_id: Option<String>,
     pub drafted_paths: Vec<String>,
     pub usage: Usage,
-    pub cost_estimate: Option<crate::pricing::CostEstimate>,
 }
 
 // ---------------------------------------------------------------------------
@@ -181,10 +198,261 @@ tags: [tag1, tag2]
 Body content here with [[wikilinks]] to related notes."#;
 
 // ---------------------------------------------------------------------------
-// Phase 1: Explore
+// IngestEngine
 // ---------------------------------------------------------------------------
 
-async fn explore(
+pub struct IngestEngine<'a> {
+    llm: &'a dyn LlmBackend,
+    project_executor: ProjectToolExecutor,
+    project_name: String,
+    vault: Arc<Mutex<Vault>>,
+    vault_executor: VaultToolExecutor,
+    profile: &'a BrainProfile,
+    domain_skill: Option<&'a str>,
+    event_tx: Option<&'a mpsc::UnboundedSender<IngestEvent>>,
+}
+
+impl<'a> IngestEngine<'a> {
+    pub fn new(
+        llm: &'a dyn LlmBackend,
+        project_root: &Path,
+        vault: Arc<Mutex<Vault>>,
+        profile: &'a BrainProfile,
+        domain_skill: Option<&'a str>,
+        event_tx: Option<&'a mpsc::UnboundedSender<IngestEvent>>,
+    ) -> Result<Self> {
+        let project_executor = ProjectToolExecutor::new(project_root)
+            .map_err(|e| AgentError::Config(e.to_string()))?;
+
+        let project_name = project_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project")
+            .to_string();
+
+        let vault_executor = VaultToolExecutor::new(
+            vault.clone(),
+            crate::tools::SessionContext {
+                session_id: String::new(),
+                task: "ingest-explore".into(),
+                model: llm.model_name().into(),
+                provider: llm.provider_name().into(),
+            },
+        );
+
+        Ok(Self {
+            llm,
+            project_executor,
+            project_name,
+            vault,
+            vault_executor,
+            profile,
+            domain_skill,
+            event_tx,
+        })
+    }
+
+    pub fn model_name(&self) -> &str {
+        self.llm.model_name()
+    }
+
+    pub async fn explore(&self, config: &IngestConfig) -> Result<ExploreResult> {
+        let (summary, usage) = run_explore(
+            self.llm,
+            &self.project_executor,
+            &self.vault_executor,
+            self.profile,
+            self.domain_skill,
+            config,
+            self.event_tx,
+        )
+        .await?;
+        Ok(ExploreResult { summary, usage })
+    }
+
+    pub async fn plan(
+        &self,
+        summary: &str,
+        explore_usage: Usage,
+    ) -> Result<PlanResult> {
+        // Generate vault context for plan phase
+        let vault_context = {
+            let v = self.vault.lock().await;
+            if summary.is_empty() {
+                String::new()
+            } else {
+                let query: String = summary.chars().take(500).collect();
+                generate_context(&v, &query, 20)
+            }
+        };
+
+        let (plan, plan_usage) = run_plan(
+            self.llm,
+            summary,
+            &vault_context,
+            self.profile,
+            self.domain_skill,
+            self.event_tx,
+        )
+        .await?;
+
+        let mut spent = explore_usage;
+        spent.accumulate(&plan_usage);
+
+        let estimated_gen = estimate_generation_usage(&plan);
+
+        Ok(PlanResult {
+            plan,
+            usage: spent,
+            estimated_gen,
+        })
+    }
+
+    pub async fn generate(
+        &self,
+        plan: &IngestPlan,
+        plan_usage: Usage,
+    ) -> Result<GenerateResult> {
+        // Re-generate vault context for generate phase
+        let vault_context = {
+            let v = self.vault.lock().await;
+            // Use first note title as rough search query
+            let query = plan
+                .notes
+                .first()
+                .map(|n| n.title.clone())
+                .unwrap_or_default();
+            if query.is_empty() {
+                String::new()
+            } else {
+                generate_context(&v, &query, 20)
+            }
+        };
+
+        // Compute input hash for dedup
+        let input_hash = hash_project(&self.project_executor);
+
+        // Conflict detection
+        {
+            let v = self.vault.lock().await;
+            let drafts = v.drafts();
+            let output_paths: Vec<&str> =
+                plan.notes.iter().map(|n| n.path.as_str()).collect();
+
+            let sessions = drafts.list_sessions().map_err(AgentError::Vault)?;
+            for session in &sessions {
+                if session.pending_drafts > 0 {
+                    if let Some(ref h) = session.input_hash {
+                        if *h == input_hash {
+                            send_event(
+                                self.event_tx,
+                                IngestEvent::Error {
+                                    message: format!(
+                                        "same project already has pending drafts in session {} ({}/{})",
+                                        session.id, session.provider, session.model
+                                    ),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            if let Ok(conflicts) = drafts.find_conflicts(&output_paths) {
+                for (sid, info, paths) in conflicts {
+                    let model = format!("{}/{}", info.provider, info.model);
+                    for path in paths {
+                        send_event(
+                            self.event_tx,
+                            IngestEvent::Error {
+                                message: format!(
+                                    "{path} already has a pending draft from session {sid} ({model})"
+                                ),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // Create session and generate
+
+        let (session_id, drafted_paths, gen_usage) = {
+            let v = self.vault.lock().await;
+            let drafts = v.drafts();
+
+            let session_id = drafts
+                .create_session(SessionMeta {
+                    source: "ingest".to_string(),
+                    provider: self.llm.provider_name().to_string(),
+                    model: self.llm.model_name().to_string(),
+                    task: format!("ingest {}", self.project_name),
+                    input_hash: Some(input_hash),
+                })
+                .map_err(AgentError::Vault)?;
+
+            let (drafted_paths, gen_usage) = run_generate(
+                self.llm,
+                plan,
+                &self.project_executor,
+                &vault_context,
+                self.profile,
+                self.domain_skill,
+                drafts,
+                &session_id,
+                self.event_tx,
+            )
+            .await?;
+
+            (session_id, drafted_paths, gen_usage)
+        };
+
+        let mut total_usage = plan_usage;
+        total_usage.accumulate(&gen_usage);
+
+        send_event(
+            self.event_tx,
+            IngestEvent::Done {
+                session_id: session_id.clone(),
+                usage: total_usage.clone(),
+            },
+        );
+
+        Ok(GenerateResult {
+            session_id,
+            drafted_paths,
+            usage: total_usage,
+        })
+    }
+
+    pub fn estimate_generation(&self, plan: &IngestPlan) -> Usage {
+        estimate_generation_usage(plan)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cost estimation helper
+// ---------------------------------------------------------------------------
+
+pub fn estimate_generation_usage(plan: &IngestPlan) -> Usage {
+    let avg_source_tokens: u64 = 4000;
+    let est_input: u64 = plan
+        .notes
+        .iter()
+        .map(|n| n.source_files.len() as u64 * avg_source_tokens * 2)
+        .sum();
+    let est_output: u64 = plan.notes.len() as u64 * 2000;
+    Usage {
+        input_tokens: est_input,
+        output_tokens: est_output,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: Explore (private)
+// ---------------------------------------------------------------------------
+
+async fn run_explore(
     llm: &dyn LlmBackend,
     project_executor: &ProjectToolExecutor,
     vault_executor: &VaultToolExecutor,
@@ -311,7 +579,7 @@ async fn explore(
                         });
                     }
                     Err(err) => {
-                        warn!("tool {name} error: {err}");
+                        debug!("tool {name} error: {err}");
                         results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: err,
@@ -365,10 +633,10 @@ fn extract_summary(text: &str) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: Plan
+// Phase 2: Plan (private)
 // ---------------------------------------------------------------------------
 
-async fn plan_ingest(
+async fn run_plan(
     llm: &dyn LlmBackend,
     exploration_summary: &str,
     vault_context: &str,
@@ -414,11 +682,11 @@ async fn plan_ingest(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3: Generate
+// Phase 3: Generate (private)
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-async fn generate_notes(
+async fn run_generate(
     llm: &dyn LlmBackend,
     plan: &IngestPlan,
     project_executor: &ProjectToolExecutor,
@@ -567,11 +835,13 @@ fn hash_project(project_executor: &ProjectToolExecutor) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Convenience wrapper
 // ---------------------------------------------------------------------------
 
 /// Run the full ingest pipeline: explore → plan → generate → drafts.
-#[allow(clippy::too_many_arguments)]
+///
+/// Thin wrapper over `IngestEngine` — calls all three phases and returns
+/// the combined result. Used by tests and `--auto` mode.
 pub async fn run_ingest(
     llm: &dyn LlmBackend,
     project_root: &Path,
@@ -581,203 +851,39 @@ pub async fn run_ingest(
     config: &IngestConfig,
     event_tx: Option<&mpsc::UnboundedSender<IngestEvent>>,
 ) -> Result<IngestResult> {
-    let project_executor =
-        ProjectToolExecutor::new(project_root).map_err(|e| AgentError::Config(e.to_string()))?;
-
-    // Build a read-only vault executor for exploration (no session context needed
-    // since we only do search/read/list)
-    let vault_executor = {
-        VaultToolExecutor::new(
-            vault.clone(),
-            crate::tools::SessionContext {
-                session_id: String::new(),
-                task: "ingest-explore".into(),
-                model: llm.model_name().into(),
-                provider: llm.provider_name().into(),
-            },
-        )
-    };
-
-    // Phase 1: Explore
-    let (summary, explore_usage) = explore(
+    let engine = IngestEngine::new(
         llm,
-        &project_executor,
-        &vault_executor,
+        project_root,
+        vault,
         profile,
         domain_skill,
-        config,
         event_tx,
-    )
-    .await?;
+    )?;
 
-    // Generate vault context for plan + generate phases
-    let vault_context = {
-        let v = vault.lock().await;
-        if summary.is_empty() {
-            String::new()
-        } else {
-            // Use first 500 chars of summary as search query for context
-            let query: String = summary.chars().take(500).collect();
-            generate_context(&v, &query, 20)
-        }
-    };
+    let explored = engine.explore(config).await?;
 
-    // Phase 2: Plan
-    let (plan, plan_usage) =
-        plan_ingest(llm, &summary, &vault_context, profile, domain_skill, event_tx).await?;
-
-    if plan.notes.is_empty() {
-        let mut u = explore_usage;
-        u.accumulate(&plan_usage);
-        return Ok(IngestResult {
-            plan,
-            session_id: None,
-            drafted_paths: Vec::new(),
-            usage: u,
-            cost_estimate: None,
-        });
-    }
-
-    if config.plan_only {
-        let mut spent = explore_usage;
-        spent.accumulate(&plan_usage);
-
-        // Estimate remaining: each note ≈ source_files avg size × 2 input + 2000 output
-        let avg_source_tokens: u64 = 4000; // rough estimate per source file
-        let est_input: u64 = plan
-            .notes
-            .iter()
-            .map(|n| n.source_files.len() as u64 * avg_source_tokens * 2)
-            .sum();
-        let est_output: u64 = plan.notes.len() as u64 * 2000;
-        let estimated_remaining = Usage {
-            input_tokens: est_input,
-            output_tokens: est_output,
-        };
-
-        let cost_estimate = Some(crate::pricing::CostEstimate::new(
-            llm.model_name(),
-            spent.clone(),
-            estimated_remaining,
-        ));
-
-        return Ok(IngestResult {
-            plan,
-            session_id: None,
-            drafted_paths: Vec::new(),
-            usage: spent,
-            cost_estimate,
-        });
-    }
-
-    // Compute input hash for dedup
-    let input_hash = hash_project(&project_executor);
-
-    // Conflict detection
-    {
-        let v = vault.lock().await;
-        let drafts = v.drafts();
-        let output_paths: Vec<&str> = plan.notes.iter().map(|n| n.path.as_str()).collect();
-
-        // Check for same-input runs
-        let sessions = drafts.list_sessions().map_err(AgentError::Vault)?;
-        for session in &sessions {
-            if session.pending_drafts > 0 {
-                if let Some(ref h) = session.input_hash {
-                    if *h == input_hash {
-                        send_event(
-                            event_tx,
-                            IngestEvent::Error {
-                                message: format!(
-                                    "same project already has pending drafts in session {} ({}/{})",
-                                    session.id, session.provider, session.model
-                                ),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        // Check for overlapping output paths
-        if let Ok(conflicts) = drafts.find_conflicts(&output_paths) {
-            for (sid, info, paths) in conflicts {
-                let model = format!("{}/{}", info.provider, info.model);
-                for path in paths {
-                    send_event(
-                        event_tx,
-                        IngestEvent::Error {
-                            message: format!(
-                                "{path} already has a pending draft from session {sid} ({model})"
-                            ),
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    // Phase 3: Generate
-    let (session_id, drafted_paths, gen_usage) = {
-        let v = vault.lock().await;
-        let drafts = v.drafts();
-
-        let session_id = drafts
-            .create_session(SessionMeta {
-                source: "ingest".to_string(),
-                provider: llm.provider_name().to_string(),
-                model: llm.model_name().to_string(),
-                task: format!(
-                    "ingest {}",
-                    project_root
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("project")
-                ),
-                input_hash: Some(input_hash),
-            })
-            .map_err(AgentError::Vault)?;
-
-        let (drafted_paths, gen_usage) = generate_notes(
-            llm,
-            &plan,
-            &project_executor,
-            &vault_context,
-            profile,
-            domain_skill,
-            drafts,
-            &session_id,
-            event_tx,
-        )
+    let planned = engine
+        .plan(&explored.summary, explored.usage)
         .await?;
 
-        (session_id, drafted_paths, gen_usage)
-    };
+    if planned.plan.notes.is_empty() {
+        return Ok(IngestResult {
+            plan: planned.plan,
+            session_id: None,
+            drafted_paths: Vec::new(),
+            usage: planned.usage,
+        });
+    }
 
-    let mut total_usage = explore_usage;
-    total_usage.accumulate(&plan_usage);
-    total_usage.accumulate(&gen_usage);
-
-    send_event(
-        event_tx,
-        IngestEvent::Done {
-            session_id: session_id.clone(),
-            usage: total_usage.clone(),
-        },
-    );
-
-    let cost_estimate = Some(crate::pricing::CostEstimate::new(
-        llm.model_name(),
-        total_usage.clone(),
-        Usage::default(),
-    ));
+    let generated = engine
+        .generate(&planned.plan, planned.usage)
+        .await?;
 
     Ok(IngestResult {
-        plan,
-        session_id: Some(session_id),
-        drafted_paths,
-        usage: total_usage,
-        cost_estimate,
+        plan: planned.plan,
+        session_id: Some(generated.session_id),
+        drafted_paths: generated.drafted_paths,
+        usage: generated.usage,
     })
 }
 
@@ -845,7 +951,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ingest_plan_only() {
+    async fn ingest_explore_and_plan() {
         let project_dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project_dir.path().join("src")).unwrap();
         std::fs::write(
@@ -890,27 +996,25 @@ mod tests {
 
         let mock = MockBackend::new(vec![explore_response, plan_response]);
         let profile = BrainProfile::default();
-        let config = IngestConfig {
-            plan_only: true,
-            ..Default::default()
-        };
+        let vault = Arc::new(Mutex::new(vault));
 
-        let result = run_ingest(
+        let engine = IngestEngine::new(
             &mock,
             project_dir.path(),
-            Arc::new(Mutex::new(vault)),
+            vault,
             &profile,
             None,
-            &config,
             None,
         )
-        .await
         .unwrap();
 
-        assert_eq!(result.plan.notes.len(), 1);
-        assert_eq!(result.plan.notes[0].path, "concepts/hello-world.md");
-        assert!(result.session_id.is_none());
-        assert!(result.drafted_paths.is_empty());
+        let explored = engine.explore(&IngestConfig::default()).await.unwrap();
+        assert!(explored.summary.contains("hello world"));
+
+        let planned = engine.plan(&explored.summary, explored.usage).await.unwrap();
+        assert_eq!(planned.plan.notes.len(), 1);
+        assert_eq!(planned.plan.notes[0].path, "concepts/hello-world.md");
+        assert!(planned.estimated_gen.total() > 0);
     }
 
     #[tokio::test]
@@ -1051,10 +1155,7 @@ mod tests {
             Arc::new(Mutex::new(vault)),
             &BrainProfile::default(),
             None,
-            &IngestConfig {
-                plan_only: true,
-                ..Default::default()
-            },
+            &IngestConfig::default(),
             None,
         )
         .await

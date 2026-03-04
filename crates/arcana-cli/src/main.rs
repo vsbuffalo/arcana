@@ -9,8 +9,93 @@ use tracing_subscriber::EnvFilter;
 
 use commands::{Commands, Run};
 
+const WORKFLOWS_HELP: &str = "\
+\x1b[1mWorkflows:\x1b[0m
+
+  All AI pipelines follow the same pattern: plan first, generate second.
+  Planning is cheap ($0.30-0.50), generation is expensive ($2-5).
+  You always see what you'll get and what it costs before committing.
+
+  \x1b[4mIngest (external project → vault notes)\x1b[0m
+
+    arcana ingest ~/code/my-project
+    arcana ingest ~/code/my-project --skill model-extract
+
+    Reads an external codebase and authors new knowledge notes from
+    scratch. The AI explores the project (tree, README, source files),
+    understands its architecture and key concepts, then writes
+    self-contained vault notes. Source material is code; output is
+    explanatory notes — not copy-paste, but synthesized understanding.
+
+      1. Explore  AI reads the project using tools (tree, read, search)
+      2. Plan     proposes notes to create, with paths and summaries
+      3. Cost     shows tokens spent so far + estimated generation cost
+      4. Prompt   [g]enerate / [e]dit plan in $EDITOR / [q]uit
+      5. Generate writes drafts to .arcana/drafts/<session>/
+
+    Use --skill to load domain-specific extraction instructions (e.g.
+    a skill that knows how to find model equations in scientific code).
+    Use --auto to skip the interactive prompt (for scripts/CI).
+
+  \x1b[4mTidy (inbox → structured notes)\x1b[0m
+
+    arcana tidy inbox/
+    arcana tidy inbox/brain-dump.md
+    arcana tidy --tags unsorted
+
+    Takes existing messy vault notes and reorganizes them — moves to
+    the right zone, splits multi-topic dumps, extracts reusable
+    concepts. The AI reads your notes and rewrites them to fit your
+    vault's taxonomy. Source material is vault notes; output is
+    restructured vault notes.
+
+      1. Survey   reads target notes, gathers vault context
+      2. Plan     proposes moves / splits / concept extractions
+      3. Cost     shows tokens spent + estimated generation cost
+      4. Prompt   [g]enerate / [e]dit plan in $EDITOR / [q]uit
+      5. Generate writes drafts to .arcana/drafts/<session>/
+
+    Use --auto to skip the prompt. Use --tags to filter by tag.
+
+  \x1b[4mReview (approve or reject AI drafts)\x1b[0m
+
+    arcana review
+
+    All AI output lands in drafts — never directly in the vault.
+    Review shows each pending draft with a diff against the vault.
+    Accept, reject, or edit before committing. Git tracks provenance
+    (human vs AI authorship) per line via arcana blame.
+
+  \x1b[4mSkills (domain-specific AI instructions)\x1b[0m
+
+    arcana skills                    list available skills
+    arcana ingest . --skill extract  use a skill during ingest
+
+    Skills are markdown files in .arcana/skills/ that teach the AI
+    how to extract knowledge for a specific domain. They're injected
+    into the system prompt alongside your brain profile (taxonomy +
+    style guide). Examples: extracting model equations from scientific
+    code, mapping API patterns, documenting infrastructure.
+
+  \x1b[4mSearch & read\x1b[0m
+
+    arcana search \"rust async\"     full-text search across all notes
+    arcana read concepts/foo.md    print a note's content
+    arcana context \"topic\"         generate LLM context block from vault
+
+  \x1b[4mProvenance\x1b[0m
+
+    arcana blame concepts/foo.md   line-level human vs AI attribution
+    arcana log concepts/foo.md     git history for a note
+    arcana diff concepts/foo.md    uncommitted changes
+    arcana restore <note> <hash>   restore to a previous version";
+
 #[derive(Parser)]
-#[command(name = "arcana", about = "Fast Obsidian vault indexer and search")]
+#[command(
+    name = "arcana",
+    about = "Fast Obsidian vault indexer and search",
+    after_long_help = WORKFLOWS_HELP
+)]
 pub struct Cli {
     /// Path to the vault root directory
     #[arg(long, global = true, env = "ARCANA_VAULT")]

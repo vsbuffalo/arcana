@@ -18,8 +18,6 @@ use crate::types::{Message, Usage};
 
 /// Configuration for a tidy run.
 pub struct TidyConfig {
-    /// Only show the plan, don't generate drafts.
-    pub plan_only: bool,
     /// Maximum tokens per LLM call.
     pub max_tokens: u64,
 }
@@ -27,7 +25,6 @@ pub struct TidyConfig {
 impl Default for TidyConfig {
     fn default() -> Self {
         Self {
-            plan_only: false,
             max_tokens: 100_000,
         }
     }
@@ -159,9 +156,9 @@ impl TidyPlan {
 // Source note
 // ---------------------------------------------------------------------------
 
-struct SourceNote {
-    path: String,
-    content: String,
+pub struct SourceNote {
+    pub path: String,
+    pub content: String,
 }
 
 /// Compute a stable hash of source notes for deduplication across runs.
@@ -178,11 +175,229 @@ fn hash_sources(sources: &[SourceNote]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 1: Survey
+// Phase result types
+// ---------------------------------------------------------------------------
+
+pub struct SurveyResult {
+    pub sources: Vec<SourceNote>,
+    pub vault_context: String,
+}
+
+pub struct TidyPlanResult {
+    pub plan: TidyPlan,
+    pub usage: Usage,
+    pub estimated_gen: Usage,
+}
+
+pub struct TidyGenerateResult {
+    pub session_id: String,
+    pub drafted_paths: Vec<String>,
+    pub usage: Usage,
+}
+
+// ---------------------------------------------------------------------------
+// TidyEngine
+// ---------------------------------------------------------------------------
+
+pub struct TidyEngine<'a> {
+    llm: &'a dyn LlmBackend,
+    vault: Arc<Mutex<Vault>>,
+    profile: &'a BrainProfile,
+    domain_skill: Option<&'a str>,
+    event_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
+}
+
+impl<'a> TidyEngine<'a> {
+    pub fn new(
+        llm: &'a dyn LlmBackend,
+        vault: Arc<Mutex<Vault>>,
+        profile: &'a BrainProfile,
+        domain_skill: Option<&'a str>,
+        event_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
+    ) -> Self {
+        Self {
+            llm,
+            vault,
+            profile,
+            domain_skill,
+            event_tx,
+        }
+    }
+
+    pub fn model_name(&self) -> &str {
+        self.llm.model_name()
+    }
+
+    pub async fn survey(&self, target_paths: &[String]) -> Result<SurveyResult> {
+        let (sources, vault_context) = {
+            let v = self.vault.lock().await;
+            run_survey(&v, target_paths, self.event_tx)?
+        };
+
+        if sources.is_empty() {
+            return Err(AgentError::Config("no notes found to tidy".into()));
+        }
+
+        Ok(SurveyResult {
+            sources,
+            vault_context,
+        })
+    }
+
+    pub async fn plan(
+        &self,
+        sources: &[SourceNote],
+        vault_context: &str,
+    ) -> Result<TidyPlanResult> {
+        let (plan, plan_usage) = run_plan_tidy(
+            self.llm,
+            sources,
+            vault_context,
+            self.profile,
+            self.domain_skill,
+            self.event_tx,
+        )
+        .await?;
+
+        let estimated_gen = estimate_generation_usage(&plan, sources);
+
+        Ok(TidyPlanResult {
+            plan,
+            usage: plan_usage,
+            estimated_gen,
+        })
+    }
+
+    pub async fn generate(
+        &self,
+        plan: &TidyPlan,
+        sources: &[SourceNote],
+        vault_context: &str,
+        plan_usage: Usage,
+    ) -> Result<TidyGenerateResult> {
+        let input_hash = hash_sources(sources);
+        let gen_tasks = generation_tasks(plan, sources);
+        let target_desc: Vec<&str> = sources.iter().map(|s| s.path.as_str()).collect();
+
+        // Conflict detection
+        {
+            let v = self.vault.lock().await;
+            let drafts = v.drafts();
+            let output_paths = plan.output_paths();
+
+            let sessions = drafts.list_sessions().map_err(AgentError::Vault)?;
+            for session in &sessions {
+                if session.pending_drafts > 0 {
+                    if let Some(ref h) = session.input_hash {
+                        if *h == input_hash {
+                            send_event(
+                                self.event_tx,
+                                TidyEvent::SameInputWarning {
+                                    existing_session: session.id.clone(),
+                                    existing_model: format!(
+                                        "{}/{}",
+                                        session.provider, session.model
+                                    ),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            if let Ok(conflicts) = drafts.find_conflicts(&output_paths) {
+                for (sid, info, paths) in conflicts {
+                    let model = format!("{}/{}", info.provider, info.model);
+                    for path in paths {
+                        send_event(
+                            self.event_tx,
+                            TidyEvent::ConflictWarning {
+                                path,
+                                existing_session: sid.clone(),
+                                existing_model: model.clone(),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // Create session and generate
+        let (session_id, drafted_paths, gen_usage) = {
+            let v = self.vault.lock().await;
+            let drafts = v.drafts();
+
+            let session_id = drafts
+                .create_session(SessionMeta {
+                    source: "tidy".to_string(),
+                    provider: self.llm.provider_name().to_string(),
+                    model: self.llm.model_name().to_string(),
+                    task: format!("tidy {}", target_desc.join(", ")),
+                    input_hash: Some(input_hash),
+                })
+                .map_err(AgentError::Vault)?;
+
+            let (drafted_paths, gen_usage) = run_generate(
+                self.llm,
+                &gen_tasks,
+                vault_context,
+                self.profile,
+                self.domain_skill,
+                drafts,
+                &session_id,
+                self.event_tx,
+            )
+            .await?;
+
+            (session_id, drafted_paths, gen_usage)
+        };
+
+        let mut total_usage = plan_usage;
+        total_usage.accumulate(&gen_usage);
+
+        send_event(
+            self.event_tx,
+            TidyEvent::Done {
+                session_id: session_id.clone(),
+                usage: total_usage.clone(),
+            },
+        );
+
+        Ok(TidyGenerateResult {
+            session_id,
+            drafted_paths,
+            usage: total_usage,
+        })
+    }
+
+    pub fn estimate_generation(&self, plan: &TidyPlan, sources: &[SourceNote]) -> Usage {
+        estimate_generation_usage(plan, sources)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cost estimation helper
+// ---------------------------------------------------------------------------
+
+pub fn estimate_generation_usage(plan: &TidyPlan, sources: &[SourceNote]) -> Usage {
+    let source_tokens: u64 = sources
+        .iter()
+        .map(|s| s.content.len() as u64 / 4) // ~4 chars per token
+        .sum();
+    let est_input = source_tokens * 2 * plan.output_count() as u64;
+    let est_output = plan.output_count() as u64 * 2000;
+    Usage {
+        input_tokens: est_input,
+        output_tokens: est_output,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: Survey (private)
 // ---------------------------------------------------------------------------
 
 /// Read target notes and gather vault context for cross-linking.
-fn survey(
+fn run_survey(
     vault: &Vault,
     target_paths: &[String],
     event_tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
@@ -231,7 +446,7 @@ fn survey(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: Plan
+// Phase 2: Plan (private)
 // ---------------------------------------------------------------------------
 
 const PLAN_TASK: &str = r#"You are organizing messy inbox notes into a structured knowledge vault.
@@ -279,7 +494,7 @@ Respond with ONLY a JSON object (no markdown fences, no explanation):
   ]
 }"#;
 
-async fn plan_tidy(
+async fn run_plan_tidy(
     llm: &dyn LlmBackend,
     sources: &[SourceNote],
     vault_context: &str,
@@ -346,7 +561,7 @@ pub(crate) fn extract_json(text: &str) -> &str {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 3: Generate
+// Phase 3: Generate (private)
 // ---------------------------------------------------------------------------
 
 const GENERATE_TASK: &str = r#"You are writing a single note for a knowledge vault.
@@ -443,7 +658,7 @@ fn generation_tasks(plan: &TidyPlan, sources: &[SourceNote]) -> Vec<GenerationTa
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn generate_notes(
+async fn run_generate(
     llm: &dyn LlmBackend,
     tasks: &[GenerationTask],
     vault_context: &str,
@@ -554,7 +769,7 @@ async fn generate_notes(
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Convenience wrapper
 // ---------------------------------------------------------------------------
 
 /// Result of a tidy run.
@@ -563,12 +778,12 @@ pub struct TidyResult {
     pub session_id: Option<String>,
     pub drafted_paths: Vec<String>,
     pub usage: Usage,
-    pub cost_estimate: Option<crate::pricing::CostEstimate>,
 }
 
 /// Run the full tidy pipeline: survey → plan → generate → drafts.
 ///
-/// If `config.plan_only` is true, stops after planning (no drafts created).
+/// Thin wrapper over `TidyEngine` — calls all phases and returns
+/// the combined result. Used by tests and `--auto` mode.
 pub async fn run_tidy(
     llm: &dyn LlmBackend,
     vault: Arc<Mutex<Vault>>,
@@ -578,164 +793,40 @@ pub async fn run_tidy(
     config: &TidyConfig,
     event_tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
 ) -> Result<TidyResult> {
-    // Phase 1: Survey
-    let (sources, vault_context) = {
-        let v = vault.lock().await;
-        survey(&v, &target_paths, event_tx)?
-    };
+    // Suppress unused warning — config is reserved for future use (e.g. max_tokens guard)
+    let _ = config;
 
-    if sources.is_empty() {
-        return Err(AgentError::Config("no notes found to tidy".into()));
-    }
+    let engine = TidyEngine::new(llm, vault, profile, domain_skill, event_tx);
 
-    // Phase 2: Plan
-    let (plan, plan_usage) = plan_tidy(
-        llm,
-        &sources,
-        &vault_context,
-        profile,
-        domain_skill,
-        event_tx,
-    )
-    .await?;
+    let surveyed = engine.survey(&target_paths).await?;
 
-    if plan.actions.is_empty() {
+    let planned = engine
+        .plan(&surveyed.sources, &surveyed.vault_context)
+        .await?;
+
+    if planned.plan.actions.is_empty() {
         return Ok(TidyResult {
-            plan,
+            plan: planned.plan,
             session_id: None,
             drafted_paths: Vec::new(),
-            usage: plan_usage,
-            cost_estimate: None,
+            usage: planned.usage,
         });
     }
 
-    if config.plan_only {
-        // Estimate remaining: source material sizes are known from the survey
-        let source_tokens: u64 = sources
-            .iter()
-            .map(|s| s.content.len() as u64 / 4) // ~4 chars per token
-            .sum();
-        let est_input = source_tokens * 2 * plan.output_count() as u64;
-        let est_output = plan.output_count() as u64 * 2000;
-        let estimated_remaining = Usage {
-            input_tokens: est_input,
-            output_tokens: est_output,
-        };
-
-        let cost_estimate = Some(crate::pricing::CostEstimate::new(
-            llm.model_name(),
-            plan_usage.clone(),
-            estimated_remaining,
-        ));
-
-        return Ok(TidyResult {
-            plan,
-            session_id: None,
-            drafted_paths: Vec::new(),
-            usage: plan_usage,
-            cost_estimate,
-        });
-    }
-
-    // Compute input hash for dedup across runs
-    let input_hash = hash_sources(&sources);
-
-    // Phase 2.5: Conflict detection
-    let gen_tasks = generation_tasks(&plan, &sources);
-    {
-        let v = vault.lock().await;
-        let drafts = v.drafts();
-        let output_paths = plan.output_paths();
-
-        // Check for same-input runs (e.g. comparing models)
-        let sessions = drafts.list_sessions().map_err(AgentError::Vault)?;
-        for session in &sessions {
-            if session.pending_drafts > 0 {
-                if let Some(ref h) = session.input_hash {
-                    if *h == input_hash {
-                        send_event(
-                            event_tx,
-                            TidyEvent::SameInputWarning {
-                                existing_session: session.id.clone(),
-                                existing_model: format!("{}/{}", session.provider, session.model),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        // Check for overlapping output paths
-        if let Ok(conflicts) = drafts.find_conflicts(&output_paths) {
-            for (sid, info, paths) in conflicts {
-                let model = format!("{}/{}", info.provider, info.model);
-                for path in paths {
-                    send_event(
-                        event_tx,
-                        TidyEvent::ConflictWarning {
-                            path,
-                            existing_session: sid.clone(),
-                            existing_model: model.clone(),
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    // Phase 3: Generate
-    let (session_id, drafted_paths, gen_usage) = {
-        let v = vault.lock().await;
-        let drafts = v.drafts();
-
-        let session_id = drafts
-            .create_session(SessionMeta {
-                source: "tidy".to_string(),
-                provider: llm.provider_name().to_string(),
-                model: llm.model_name().to_string(),
-                task: format!("tidy {}", target_paths.join(", ")),
-                input_hash: Some(input_hash),
-            })
-            .map_err(AgentError::Vault)?;
-
-        let (drafted_paths, gen_usage) = generate_notes(
-            llm,
-            &gen_tasks,
-            &vault_context,
-            profile,
-            domain_skill,
-            drafts,
-            &session_id,
-            event_tx,
+    let generated = engine
+        .generate(
+            &planned.plan,
+            &surveyed.sources,
+            &surveyed.vault_context,
+            planned.usage,
         )
         .await?;
 
-        (session_id, drafted_paths, gen_usage)
-    };
-
-    let mut total_usage = plan_usage;
-    total_usage.accumulate(&gen_usage);
-
-    send_event(
-        event_tx,
-        TidyEvent::Done {
-            session_id: session_id.clone(),
-            usage: total_usage.clone(),
-        },
-    );
-
-    let cost_estimate = Some(crate::pricing::CostEstimate::new(
-        llm.model_name(),
-        total_usage.clone(),
-        Usage::default(),
-    ));
-
     Ok(TidyResult {
-        plan,
-        session_id: Some(session_id),
-        drafted_paths,
-        usage: total_usage,
-        cost_estimate,
+        plan: planned.plan,
+        session_id: Some(generated.session_id),
+        drafted_paths: generated.drafted_paths,
+        usage: generated.usage,
     })
 }
 
@@ -829,9 +920,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tidy_plan_only() {
+    async fn tidy_survey_and_plan() {
         let dir = tempfile::tempdir().unwrap();
-        // Create an inbox note
         let inbox = dir.path().join("inbox");
         std::fs::create_dir_all(&inbox).unwrap();
         std::fs::write(
@@ -858,27 +948,23 @@ mod tests {
         }]);
 
         let profile = BrainProfile::default();
-        let tidy_config = TidyConfig {
-            plan_only: true,
-            ..Default::default()
-        };
+        let vault = Arc::new(Mutex::new(vault));
 
-        let result = run_tidy(
-            &mock,
-            Arc::new(Mutex::new(vault)),
-            vec!["inbox/dump.md".into()],
-            &profile,
-            None,
-            &tidy_config,
-            None,
-        )
-        .await
-        .unwrap();
+        let engine = TidyEngine::new(&mock, vault, &profile, None, None);
 
-        assert_eq!(result.plan.actions.len(), 1);
-        assert_eq!(result.plan.output_count(), 2);
-        assert!(result.session_id.is_none()); // plan_only = no session
-        assert!(result.drafted_paths.is_empty());
+        let surveyed = engine
+            .survey(&["inbox/dump.md".into()])
+            .await
+            .unwrap();
+        assert_eq!(surveyed.sources.len(), 1);
+
+        let planned = engine
+            .plan(&surveyed.sources, &surveyed.vault_context)
+            .await
+            .unwrap();
+        assert_eq!(planned.plan.actions.len(), 1);
+        assert_eq!(planned.plan.output_count(), 2);
+        assert!(planned.estimated_gen.total() > 0);
     }
 
     #[tokio::test]
