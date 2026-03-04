@@ -7,12 +7,24 @@ use crate::note::{FileMeta, Frontmatter, Note};
 
 pub struct NoteWriter {
     root: PathBuf,
+    zones: Vec<String>,
+    projects: Vec<String>,
 }
 
 impl NoteWriter {
     pub fn new(root: &Path) -> Self {
         NoteWriter {
             root: root.to_path_buf(),
+            zones: Vec::new(),
+            projects: Vec::new(),
+        }
+    }
+
+    pub fn with_zones(root: &Path, zones: Vec<String>, projects: Vec<String>) -> Self {
+        NoteWriter {
+            root: root.to_path_buf(),
+            zones,
+            projects,
         }
     }
 
@@ -22,6 +34,7 @@ impl NoteWriter {
         body: &str,
         frontmatter: Option<Frontmatter>,
     ) -> Result<PathBuf> {
+        validate_zone(rel_path, &self.zones, &self.projects)?;
         let full_path = self.safe_path(rel_path)?;
 
         if full_path.exists() {
@@ -107,6 +120,34 @@ impl NoteWriter {
 
         Ok(full_path)
     }
+}
+
+pub fn validate_zone(rel_path: &str, zones: &[String], projects: &[String]) -> Result<()> {
+    if zones.is_empty() {
+        return Ok(());
+    }
+    if zones.iter().any(|z| rel_path.starts_with(z.as_str())) {
+        return Ok(());
+    }
+    let zones_str = zones.join(", ");
+    if let Some(suggestion) = suggest_zone(rel_path, projects) {
+        return Err(ArcanaError::InvalidZone {
+            message: format!(
+                "'{rel_path}' is outside allowed zones. Did you mean '{suggestion}'? Allowed: {zones_str}"
+            ),
+        });
+    }
+    Err(ArcanaError::InvalidZone {
+        message: format!("'{rel_path}' is outside allowed zones. Allowed: {zones_str}"),
+    })
+}
+
+fn suggest_zone(rel_path: &str, projects: &[String]) -> Option<String> {
+    let first = rel_path.split('/').next()?;
+    if projects.iter().any(|p| p == first) {
+        return Some(format!("projects/{rel_path}"));
+    }
+    None
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
@@ -232,6 +273,46 @@ mod tests {
 
         writer.create("dup.md", "First", None).unwrap();
         let result = writer.create("dup.md", "Second", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_zone_valid() {
+        let zones = vec!["concepts/".into(), "projects/".into()];
+        assert!(validate_zone("projects/arcana/foo.md", &zones, &[]).is_ok());
+        assert!(validate_zone("concepts/rust.md", &zones, &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_zone_invalid() {
+        let zones = vec!["concepts/".into(), "projects/".into()];
+        let result = validate_zone("random/foo.md", &zones, &[]);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("outside allowed zones") || err.contains("Allowed"));
+    }
+
+    #[test]
+    fn validate_zone_empty_means_no_restriction() {
+        assert!(validate_zone("anything/goes.md", &[], &[]).is_ok());
+    }
+
+    #[test]
+    fn validate_zone_suggests_project() {
+        let zones = vec!["projects/".into(), "notes/".into()];
+        let projects = vec!["clasp".into(), "arcana".into()];
+        let result = validate_zone("clasp/foo.md", &zones, &projects);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("projects/clasp/foo.md"));
+    }
+
+    #[test]
+    fn with_zones_rejects_bad_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer =
+            NoteWriter::with_zones(dir.path(), vec!["projects/".into()], vec!["clasp".into()]);
+        let result = writer.create("random/note.md", "bad", None);
         assert!(result.is_err());
     }
 }

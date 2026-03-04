@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::errors::{ArcanaError, Result};
+use crate::writer::validate_zone;
 
 /// Per-session manifest stored as `_manifest.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +90,8 @@ pub struct SessionMeta {
 pub struct DraftManager {
     drafts_dir: PathBuf,
     vault_root: PathBuf,
+    zones: Vec<String>,
+    projects: Vec<String>,
 }
 
 impl DraftManager {
@@ -96,6 +99,17 @@ impl DraftManager {
         Self {
             drafts_dir: vault_root.join(".arcana").join("drafts"),
             vault_root: vault_root.to_path_buf(),
+            zones: Vec::new(),
+            projects: Vec::new(),
+        }
+    }
+
+    pub fn with_zones(vault_root: &Path, zones: Vec<String>, projects: Vec<String>) -> Self {
+        Self {
+            drafts_dir: vault_root.join(".arcana").join("drafts"),
+            vault_root: vault_root.to_path_buf(),
+            zones,
+            projects,
         }
     }
 
@@ -124,6 +138,7 @@ impl DraftManager {
     /// Create a new draft note in a session.
     pub fn create_draft(&self, session_id: &str, rel_path: &str, content: &str) -> Result<()> {
         self.validate_path(rel_path)?;
+        validate_zone(rel_path, &self.zones, &self.projects)?;
 
         let draft_path = self.draft_file_path(session_id, rel_path);
         if let Some(parent) = draft_path.parent() {
@@ -519,6 +534,29 @@ mod tests {
         let session_id = mgr.create_session(test_meta()).unwrap();
         let result = mgr.create_draft(&session_id, "../escape.md", "bad");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_draft_rejects_bad_zone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DraftManager::with_zones(
+            dir.path(),
+            vec!["projects/".into(), "notes/".into()],
+            vec!["clasp".into()],
+        );
+        let session_id = mgr.create_session(test_meta()).unwrap();
+        let result = mgr.create_draft(&session_id, "random/note.md", "bad");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn suggest_edit_allows_any_existing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = DraftManager::with_zones(dir.path(), vec!["projects/".into()], vec![]);
+        let session_id = mgr.create_session(test_meta()).unwrap();
+        // suggest_edit should not zone-check since it targets existing notes
+        let result = mgr.suggest_edit(&session_id, "random/existing.md", "content", "fix typo");
+        assert!(result.is_ok());
     }
 
     #[test]

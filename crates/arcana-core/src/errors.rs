@@ -14,6 +14,9 @@ pub enum ArcanaError {
     #[error("path escapes vault root: {0}")]
     PathEscape(String),
 
+    #[error("{message}")]
+    InvalidZone { message: String },
+
     #[error("index error: {0}")]
     Index(#[from] rusqlite::Error),
 

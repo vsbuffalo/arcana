@@ -166,7 +166,8 @@ pub struct ArcanaServer {
 impl ArcanaServer {
     pub fn new(vault: Vault) -> Self {
         let tool_router = Self::tool_router();
-        let instructions = build_mcp_instructions(vault.profile());
+        let tree = vault.vault_tree().unwrap_or_default();
+        let instructions = build_mcp_instructions(vault.profile(), &tree);
         Self {
             vault: Arc::new(tokio::sync::Mutex::new(vault)),
             tool_router,
@@ -175,7 +176,7 @@ impl ArcanaServer {
     }
 }
 
-fn build_mcp_instructions(profile: &arcana_core::BrainProfile) -> String {
+fn build_mcp_instructions(profile: &arcana_core::BrainProfile, tree: &str) -> String {
     let mut instructions = String::from(
         "Arcana is an Obsidian vault indexer. Use vault_search to find notes, \
          vault_read to read full content, vault_create/vault_update to write notes, \
@@ -192,8 +193,14 @@ fn build_mcp_instructions(profile: &arcana_core::BrainProfile) -> String {
         if let Some(sty) = profile.style() {
             instructions.push_str("<style_guide>\n");
             instructions.push_str(sty);
-            instructions.push_str("\n</style_guide>");
+            instructions.push_str("\n</style_guide>\n\n");
         }
+    }
+
+    if !tree.is_empty() {
+        instructions.push_str("\n<vault_structure>\n");
+        instructions.push_str(tree);
+        instructions.push_str("</vault_structure>");
     }
 
     instructions
@@ -271,7 +278,7 @@ impl ArcanaServer {
     }
 
     #[tool(
-        description = "Create a new note in the vault with optional title, tags, and body. The note is immediately indexed for search."
+        description = "Create a new note in the vault with optional title, tags, and body. The note is immediately indexed for search. Path MUST start with a valid zone prefix (e.g. concepts/, projects/, notes/). Notes targeting a specific project go under projects/<project-name>/. Invalid paths will be rejected with zone suggestions."
     )]
     async fn vault_create(
         &self,
@@ -391,7 +398,7 @@ impl ArcanaServer {
     }
 
     #[tool(
-        description = "Create a draft note for review. The note goes to a staging area and must be approved before entering the vault."
+        description = "Create a draft note for review. The note goes to a staging area and must be approved before entering the vault. Path MUST start with a valid zone prefix (e.g. concepts/, projects/, notes/). Notes targeting a specific project go under projects/<project-name>/. Invalid paths will be rejected with zone suggestions."
     )]
     async fn vault_draft(
         &self,
@@ -541,7 +548,8 @@ pub async fn serve_stdio(vault: Vault) -> anyhow::Result<()> {
 
 /// Serve the MCP server over HTTP with streamable SSE (for Claude Web / remote clients).
 pub async fn serve_sse(vault: Vault, port: u16) -> anyhow::Result<()> {
-    let instructions = build_mcp_instructions(vault.profile());
+    let tree = vault.vault_tree().unwrap_or_default();
+    let instructions = build_mcp_instructions(vault.profile(), &tree);
     let vault = Arc::new(tokio::sync::Mutex::new(vault));
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();

@@ -27,7 +27,6 @@ pub struct TidyArgs {
     /// Model override
     #[arg(long)]
     pub model: Option<String>,
-
 }
 
 pub fn run_tidy(args: TidyArgs, config: ArcanaConfig) -> Result<()> {

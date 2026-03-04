@@ -1,4 +1,5 @@
 use rayon::prelude::*;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -65,8 +66,8 @@ impl Vault {
             (None, None)
         };
 
-        let drafts = DraftManager::new(&root);
         let profile = BrainProfile::load(&root);
+        let drafts = DraftManager::with_zones(&root, profile.zones(), profile.projects());
 
         Ok(Vault {
             db,
@@ -88,8 +89,8 @@ impl Vault {
             ))
         })?;
         let db = Database::open_in_memory()?;
-        let drafts = DraftManager::new(&root);
         let profile = BrainProfile::load(&root);
+        let drafts = DraftManager::with_zones(&root, profile.zones(), profile.projects());
         Ok(Vault {
             db,
             config,
@@ -348,7 +349,8 @@ impl Vault {
         body: &str,
         frontmatter: Option<Frontmatter>,
     ) -> Result<()> {
-        let writer = NoteWriter::new(&self.root);
+        let writer =
+            NoteWriter::with_zones(&self.root, self.profile.zones(), self.profile.projects());
         writer.create(rel_path, body, frontmatter)?;
         self.reindex_paths(&[self.root.join(rel_path)])?;
 
@@ -397,6 +399,34 @@ impl Vault {
 
     pub fn profile(&self) -> &BrainProfile {
         &self.profile
+    }
+
+    /// Condensed directory tree (top 2 levels + note counts) from the index.
+    pub fn vault_tree(&self) -> Result<String> {
+        self.db.set_query_only(true)?;
+        let result = (|| {
+            let paths = self.db.get_all_paths()?;
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+
+            for path in &paths {
+                let parts: Vec<&str> = path.split('/').collect();
+                let prefix = match parts.len() {
+                    0 | 1 => continue, // root-level files, skip
+                    2 => format!("{}/", parts[0]),
+                    _ => format!("{}/{}/", parts[0], parts[1]),
+                };
+                *counts.entry(prefix).or_insert(0) += 1;
+            }
+
+            let mut out = String::new();
+            for (prefix, count) in &counts {
+                let label = if *count == 1 { "note" } else { "notes" };
+                out.push_str(&format!("{prefix} ({count} {label})\n"));
+            }
+            Ok(out)
+        })();
+        self.db.set_query_only(false)?;
+        result
     }
 }
 
