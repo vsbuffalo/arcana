@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::permissions::{chat_permissions, ApprovalResult};
 use crate::tools::{SessionContext, VaultToolExecutor};
 use crate::types::{ContentBlock, Message, StopReason, ToolDef, Usage};
-use arcana_core::Vault;
+use arcana_core::{BrainProfile, Vault};
 
 /// Callback type for approval requests.
 pub type ApprovalFn<'a> = &'a dyn Fn(&str, &str, &serde_json::Value) -> ApprovalResult;
@@ -39,8 +39,9 @@ impl ChatSession {
         vault: Arc<Mutex<Vault>>,
         session_id: String,
         config: AgentConfig,
+        profile: &BrainProfile,
     ) -> Self {
-        let system_prompt = build_librarian_prompt();
+        let system_prompt = build_librarian_prompt(profile.taxonomy(), profile.style());
         let tools = VaultToolExecutor::chat_tool_defs();
 
         Self {
@@ -256,26 +257,45 @@ fn format_tool_description(tool_name: &str, input: &serde_json::Value) -> String
     }
 }
 
-fn build_librarian_prompt() -> String {
-    r#"You are a librarian for an Obsidian knowledge vault. You help users explore, understand, and organize their notes.
+fn build_librarian_prompt(taxonomy: Option<&str>, style: Option<&str>) -> String {
+    let mut prompt = String::with_capacity(4096);
 
-## Your capabilities
+    if let Some(tax) = taxonomy {
+        prompt.push_str("<taxonomy>\n");
+        prompt.push_str(tax);
+        prompt.push_str("\n</taxonomy>\n\n");
+    }
 
-- **Search freely**: Use vault_search, vault_read, and vault_list to explore the vault
-- **Draft notes**: Use vault_draft to propose new notes — they go to a staging area for user review
-- **Suggest edits**: Use vault_suggest_edit to propose changes to existing notes
+    if let Some(sty) = style {
+        prompt.push_str("<style_guide>\n");
+        prompt.push_str(sty);
+        prompt.push_str("\n</style_guide>\n\n");
+    }
+
+    prompt.push_str(r#"You are a librarian for this Obsidian knowledge vault.
+
+## Conversational style
+- Concise and direct. No filler, no preamble.
+- No emojis. Use unicode symbols (→, —, ·) sparingly if needed.
+- Respond like a knowledgeable colleague, not a chatbot.
+
+## Capabilities
+- Search, read, and list notes freely
+- Draft new notes for user review (vault_draft)
+- Suggest edits to existing notes (vault_suggest_edit)
 
 ## Rules
-
-- You CANNOT directly create or modify notes in the vault. Use vault_draft and vault_suggest_edit instead.
-- When drafting notes, follow the vault's existing conventions for naming, structure, and tagging
-- Link to existing notes with [[wikilinks]] when relevant
-- Be concise and helpful in your responses
-- When the user asks about their vault's contents, search first before answering
+- Never write directly to the vault. Always use drafts.
+- Follow the taxonomy for note placement and the style guide for formatting.
+- Cross-link to existing notes with [[wikilinks]] when relevant.
+- When the user dumps raw thoughts, apply the taxonomy routing rules.
+- One idea per note. Split if needed.
+- When the user asks about their vault's contents, search first before answering.
 
 ## Tips for the user
-- Suggest `arcana context "<topic>"` when the user wants to export vault context for use in other tools or conversations"#
-        .to_string()
+- Suggest `arcana context "<topic>"` when the user wants to export vault context for use in other tools or conversations"#);
+
+    prompt
 }
 
 #[cfg(test)]
@@ -299,6 +319,7 @@ mod tests {
             Arc::new(Mutex::new(vault)),
             "test-session".into(),
             AgentConfig::default(),
+            &BrainProfile::default(),
         );
 
         let response = session.send("hello", None, None).await.unwrap();
@@ -344,6 +365,7 @@ mod tests {
             Arc::new(Mutex::new(vault)),
             "test-session".into(),
             AgentConfig::default(),
+            &BrainProfile::default(),
         );
 
         let response = session
@@ -390,6 +412,7 @@ mod tests {
             Arc::new(Mutex::new(vault)),
             "test-session".into(),
             AgentConfig::default(),
+            &BrainProfile::default(),
         );
 
         let r1 = session.send("hello", None, None).await.unwrap();

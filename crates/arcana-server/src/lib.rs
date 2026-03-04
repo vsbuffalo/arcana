@@ -160,16 +160,43 @@ struct ListEntryJson {
 pub struct ArcanaServer {
     vault: Arc<tokio::sync::Mutex<Vault>>,
     tool_router: ToolRouter<Self>,
+    instructions: String,
 }
 
 impl ArcanaServer {
     pub fn new(vault: Vault) -> Self {
         let tool_router = Self::tool_router();
+        let instructions = build_mcp_instructions(vault.profile());
         Self {
             vault: Arc::new(tokio::sync::Mutex::new(vault)),
             tool_router,
+            instructions,
         }
     }
+}
+
+fn build_mcp_instructions(profile: &arcana_core::BrainProfile) -> String {
+    let mut instructions = String::from(
+        "Arcana is an Obsidian vault indexer. Use vault_search to find notes, \
+         vault_read to read full content, vault_create/vault_update to write notes, \
+         vault_list to browse, and vault_stats for overview.",
+    );
+
+    if !profile.is_empty() {
+        instructions.push_str("\n\n");
+        if let Some(tax) = profile.taxonomy() {
+            instructions.push_str("<taxonomy>\n");
+            instructions.push_str(tax);
+            instructions.push_str("\n</taxonomy>\n\n");
+        }
+        if let Some(sty) = profile.style() {
+            instructions.push_str("<style_guide>\n");
+            instructions.push_str(sty);
+            instructions.push_str("\n</style_guide>");
+        }
+    }
+
+    instructions
 }
 
 /// Strip `<mark>` tags from search snippets (terminal highlighting, not useful for LLMs).
@@ -489,12 +516,7 @@ impl ServerHandler for ArcanaServer {
                 version: env!("CARGO_PKG_VERSION").into(),
                 ..Default::default()
             },
-            instructions: Some(
-                "Arcana is an Obsidian vault indexer. Use vault_search to find notes, \
-                 vault_read to read full content, vault_create/vault_update to write notes, \
-                 vault_list to browse, and vault_stats for overview."
-                    .into(),
-            ),
+            instructions: Some(self.instructions.clone()),
         }
     }
 }
@@ -517,6 +539,7 @@ pub async fn serve_stdio(vault: Vault) -> anyhow::Result<()> {
 
 /// Serve the MCP server over HTTP with streamable SSE (for Claude Web / remote clients).
 pub async fn serve_sse(vault: Vault, port: u16) -> anyhow::Result<()> {
+    let instructions = build_mcp_instructions(vault.profile());
     let vault = Arc::new(tokio::sync::Mutex::new(vault));
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
@@ -524,9 +547,11 @@ pub async fn serve_sse(vault: Vault, port: u16) -> anyhow::Result<()> {
     let service = StreamableHttpService::new(
         move || {
             let vault = vault.clone();
+            let instructions = instructions.clone();
             Ok(ArcanaServer {
                 vault,
                 tool_router: ArcanaServer::tool_router(),
+                instructions,
             })
         },
         Arc::new(LocalSessionManager::default()),

@@ -11,6 +11,7 @@ use crate::git::{InitInfo, VaultGit};
 use crate::index::fts::{IndexEntry, IndexStats};
 use crate::index::Database;
 use crate::note::{extract_inline_tags, extract_wikilinks, FileMeta, Frontmatter, Note};
+use crate::profile::BrainProfile;
 use crate::search::{SearchFilters, SearchQuery, SearchResult};
 use crate::writer::NoteWriter;
 
@@ -21,6 +22,7 @@ pub struct Vault {
     git: Option<VaultGit>,
     init_info: Option<InitInfo>,
     drafts: DraftManager,
+    profile: BrainProfile,
 }
 
 #[derive(Debug)]
@@ -64,6 +66,7 @@ impl Vault {
         };
 
         let drafts = DraftManager::new(&root);
+        let profile = BrainProfile::load(&root);
 
         Ok(Vault {
             db,
@@ -72,6 +75,7 @@ impl Vault {
             git,
             init_info,
             drafts,
+            profile,
         })
     }
 
@@ -85,6 +89,7 @@ impl Vault {
         })?;
         let db = Database::open_in_memory()?;
         let drafts = DraftManager::new(&root);
+        let profile = BrainProfile::load(&root);
         Ok(Vault {
             db,
             config,
@@ -92,6 +97,7 @@ impl Vault {
             git: None,
             init_info: None,
             drafts,
+            profile,
         })
     }
 
@@ -387,6 +393,10 @@ impl Vault {
 
     pub fn drafts(&self) -> &DraftManager {
         &self.drafts
+    }
+
+    pub fn profile(&self) -> &BrainProfile {
+        &self.profile
     }
 }
 

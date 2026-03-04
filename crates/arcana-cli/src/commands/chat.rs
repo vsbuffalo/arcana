@@ -56,6 +56,8 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig) -> Result<()> {
         max_tokens: config.agent.max_tokens as u64,
     };
 
+    let profile = vault.profile().clone();
+
     eprintln!(
         "{} {} ({})",
         "arcana chat".bold(),
@@ -65,8 +67,15 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig) -> Result<()> {
     eprintln!(
         "{}",
         format!(
-            "vault: {} notes, {} tags, {} links",
-            stats.total_notes, stats.total_tags, stats.total_links
+            "vault: {} notes, {} tags, {} links{}",
+            stats.total_notes,
+            stats.total_tags,
+            stats.total_links,
+            if profile.is_empty() {
+                ""
+            } else {
+                ", brain profile loaded"
+            }
         )
         .dimmed()
     );
@@ -74,7 +83,7 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig) -> Result<()> {
     eprintln!();
 
     let vault = Arc::new(Mutex::new(vault));
-    let mut session = ChatSession::new(backend, vault, session_id, agent_config);
+    let mut session = ChatSession::new(backend, vault, session_id, agent_config, &profile);
 
     // Set up history file
     let history_path = config.vault.path.join(".arcana").join("chat_history");
@@ -133,6 +142,7 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig) -> Result<()> {
                                         .unwrap_or(config.agent.max_iterations),
                                     max_tokens: config.agent.max_tokens as u64,
                                 },
+                                &profile,
                             );
                             eprintln!("{}", "conversation cleared".dimmed());
                             continue;
