@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use arcana_core::{Frontmatter, SearchFilters, SearchQuery, Vault, VaultStats};
+use arcana_core::{Frontmatter, SearchFilters, SearchQuery, SessionMeta, Vault, VaultStats};
 use rmcp::{
     handler::server::tool::ToolRouter,
     handler::server::wrapper::Parameters,
@@ -86,6 +86,37 @@ pub struct VaultListInput {
     /// Maximum number of results (default: 50)
     #[serde(default)]
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct VaultDraftInput {
+    /// Relative path for the new note (e.g. "research/quantum.md")
+    pub path: String,
+    /// Note title (stored in YAML frontmatter)
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Markdown body content
+    #[serde(default)]
+    pub body: String,
+    /// Tags to add to the note's frontmatter
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct VaultSuggestEditInput {
+    /// Path to the existing note to suggest changes for
+    pub path: String,
+    /// Proposed new body content
+    pub body: String,
+    /// Explanation of why this edit is suggested
+    pub reason: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct VaultProvenanceInput {
+    /// Relative path to the note
+    pub path: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +360,113 @@ impl ArcanaServer {
             total_links: stats.total_links,
         };
         let text = to_json_text(&json)?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        description = "Create a draft note for review. The note goes to a staging area and must be approved before entering the vault."
+    )]
+    async fn vault_draft(
+        &self,
+        Parameters(input): Parameters<VaultDraftInput>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let vault = self.vault.lock().await;
+        let drafts = vault.drafts();
+
+        let session_id = drafts
+            .create_session(SessionMeta {
+                source: "mcp".to_string(),
+                provider: "mcp-client".to_string(),
+                model: "unknown".to_string(),
+                task: "draft".to_string(),
+            })
+            .map_err(vault_err)?;
+
+        // Build note content with frontmatter
+        let fm = if input.title.is_some() || !input.tags.is_empty() {
+            Some(Frontmatter {
+                title: input.title,
+                tags: input.tags,
+                ..Default::default()
+            })
+        } else {
+            None
+        };
+
+        let content = if let Some(fm) = fm {
+            let note = arcana_core::Note {
+                path: std::path::PathBuf::from(&input.path),
+                frontmatter: fm,
+                body: input.body,
+                file_meta: arcana_core::FileMeta {
+                    size_bytes: 0,
+                    modified_on_disk: std::time::SystemTime::now(),
+                    content_hash: 0,
+                },
+            };
+            note.to_string()
+        } else {
+            input.body
+        };
+
+        drafts
+            .create_draft(&session_id, &input.path, &content)
+            .map_err(vault_err)?;
+
+        let text = to_json_text(&serde_json::json!({
+            "drafted": input.path,
+            "session": session_id,
+            "status": "pending review"
+        }))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        description = "Suggest an edit to an existing note. The suggestion is staged for review and must be approved before being applied."
+    )]
+    async fn vault_suggest_edit(
+        &self,
+        Parameters(input): Parameters<VaultSuggestEditInput>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let vault = self.vault.lock().await;
+        let drafts = vault.drafts();
+
+        let session_id = drafts
+            .create_session(SessionMeta {
+                source: "mcp".to_string(),
+                provider: "mcp-client".to_string(),
+                model: "unknown".to_string(),
+                task: "suggest-edit".to_string(),
+            })
+            .map_err(vault_err)?;
+
+        drafts
+            .suggest_edit(&session_id, &input.path, &input.body, &input.reason)
+            .map_err(vault_err)?;
+
+        let text = to_json_text(&serde_json::json!({
+            "suggested_edit": input.path,
+            "session": session_id,
+            "reason": input.reason,
+            "status": "pending review"
+        }))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(
+        description = "Get provenance stats for a note: percentage of content authored by humans vs AI, based on git blame."
+    )]
+    async fn vault_provenance(
+        &self,
+        Parameters(input): Parameters<VaultProvenanceInput>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let vault = self.vault.lock().await;
+        let git = vault.git().ok_or_else(|| {
+            rmcp::ErrorData::internal_error("git not enabled for this vault".to_string(), None)
+        })?;
+
+        let prov = git.provenance(&input.path).map_err(vault_err)?;
+        let text = to_json_text(&prov)?;
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }

@@ -35,6 +35,12 @@ pub struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // The `colored` crate checks stdout for TTY, but we write human output to
+    // stderr. Force color on when stderr is a terminal.
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        colored::control::set_override(true);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level)),
@@ -49,7 +55,16 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?
             .with_vault_path(vault_path)
     } else {
-        arcana_core::ArcanaConfig::default().with_vault_path(vault_path)
+        // Auto-discover .arcana/config.toml in the vault
+        let auto_path = vault_path.join(".arcana").join("config.toml");
+        if auto_path.is_file() {
+            tracing::debug!("loading config from {}", auto_path.display());
+            arcana_core::ArcanaConfig::load(&auto_path)
+                .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?
+                .with_vault_path(vault_path)
+        } else {
+            arcana_core::ArcanaConfig::default().with_vault_path(vault_path)
+        }
     };
 
     cli.command.run(config, cli.json)

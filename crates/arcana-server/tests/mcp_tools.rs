@@ -47,7 +47,7 @@ fn server_info_is_correct() {
 }
 
 #[test]
-fn tool_list_has_all_six_tools() {
+fn tool_list_has_all_tools() {
     let tmp = tempfile::tempdir().unwrap();
     let _vault = setup_vault(tmp.path());
 
@@ -61,7 +61,16 @@ fn tool_list_has_all_six_tools() {
     assert!(names.contains(&"vault_update"), "missing vault_update");
     assert!(names.contains(&"vault_list"), "missing vault_list");
     assert!(names.contains(&"vault_stats"), "missing vault_stats");
-    assert_eq!(names.len(), 6, "should have exactly 6 tools");
+    assert!(names.contains(&"vault_draft"), "missing vault_draft");
+    assert!(
+        names.contains(&"vault_suggest_edit"),
+        "missing vault_suggest_edit"
+    );
+    assert!(
+        names.contains(&"vault_provenance"),
+        "missing vault_provenance"
+    );
+    assert_eq!(names.len(), 9, "should have exactly 9 tools");
 }
 
 #[test]

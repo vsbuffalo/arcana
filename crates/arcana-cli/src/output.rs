@@ -1,4 +1,11 @@
+use std::io::IsTerminal;
+
 use colored::Colorize;
+
+/// Check if stderr is a TTY (for commands that output to stderr).
+pub fn is_stderr_tty() -> bool {
+    std::io::stderr().is_terminal()
+}
 
 pub fn print_header(text: &str) {
     println!("{}", text.bold().cyan());
@@ -13,6 +20,21 @@ pub fn print_separator() {
 }
 
 const RULE_WIDTH: usize = 60;
+
+pub fn print_git_init_info(vault: &arcana_core::Vault) {
+    if let Some(info) = vault.git_init_info() {
+        if info.newly_created {
+            eprintln!("  {} git repository", "initialized".green().bold());
+            if info.adopted_files > 0 {
+                eprintln!(
+                    "  {} {} existing notes as human-authored",
+                    "committed".green().bold(),
+                    info.adopted_files,
+                );
+            }
+        }
+    }
+}
 
 pub fn print_search_result(path: &str, snippet: &str) {
     // ──────────── path/to/note.md ────────────

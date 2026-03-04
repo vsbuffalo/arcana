@@ -37,6 +37,9 @@ pub struct SearchArgs {
 impl Run for SearchArgs {
     fn run(self, config: ArcanaConfig, json: bool) -> Result<()> {
         let vault = Vault::open(config)?;
+        if !json {
+            output::print_git_init_info(&vault);
+        }
 
         let query = SearchQuery {
             text: self.query,

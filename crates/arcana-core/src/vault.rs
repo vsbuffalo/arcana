@@ -5,7 +5,9 @@ use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
 use crate::config::ArcanaConfig;
+use crate::drafts::DraftManager;
 use crate::errors::{ArcanaError, Result};
+use crate::git::{InitInfo, VaultGit};
 use crate::index::fts::{IndexEntry, IndexStats};
 use crate::index::Database;
 use crate::note::{extract_inline_tags, extract_wikilinks, FileMeta, Frontmatter, Note};
@@ -16,6 +18,9 @@ pub struct Vault {
     pub(crate) db: Database,
     pub(crate) config: ArcanaConfig,
     pub(crate) root: PathBuf,
+    git: Option<VaultGit>,
+    init_info: Option<InitInfo>,
+    drafts: DraftManager,
 }
 
 #[derive(Debug)]
@@ -46,7 +51,28 @@ impl Vault {
         debug!("opening database at {}", db_path.display());
         let db = Database::open(&db_path)?;
 
-        Ok(Vault { db, config, root })
+        let (git, init_info) = if config.git.enabled {
+            match VaultGit::open_or_init(&root, &config.git) {
+                Ok((g, info)) => (Some(g), Some(info)),
+                Err(e) => {
+                    warn!("git init failed, continuing without git: {e}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        let drafts = DraftManager::new(&root);
+
+        Ok(Vault {
+            db,
+            config,
+            root,
+            git,
+            init_info,
+            drafts,
+        })
     }
 
     pub fn open_in_memory(config: ArcanaConfig) -> Result<Self> {
@@ -58,11 +84,23 @@ impl Vault {
             ))
         })?;
         let db = Database::open_in_memory()?;
-        Ok(Vault { db, config, root })
+        let drafts = DraftManager::new(&root);
+        Ok(Vault {
+            db,
+            config,
+            root,
+            git: None,
+            init_info: None,
+            drafts,
+        })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn git_init_info(&self) -> Option<&InitInfo> {
+        self.init_info.as_ref()
     }
 
     pub fn index(&self) -> Result<IndexStats> {
@@ -307,6 +345,16 @@ impl Vault {
         let writer = NoteWriter::new(&self.root);
         writer.create(rel_path, body, frontmatter)?;
         self.reindex_paths(&[self.root.join(rel_path)])?;
+
+        if let Some(ref git) = self.git {
+            if self.config.git.auto_commit {
+                let msg = format!("arcana: create {rel_path}");
+                if let Err(e) = git.commit_ai_write(&[Path::new(rel_path)], &msg) {
+                    warn!("git commit failed for create: {e}");
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -320,7 +368,25 @@ impl Vault {
         let writer = NoteWriter::new(&self.root);
         writer.update(rel_path, body, append, frontmatter_patch)?;
         self.reindex_paths(&[self.root.join(rel_path)])?;
+
+        if let Some(ref git) = self.git {
+            if self.config.git.auto_commit {
+                let msg = format!("arcana: update {rel_path}");
+                if let Err(e) = git.commit_ai_write(&[Path::new(rel_path)], &msg) {
+                    warn!("git commit failed for update: {e}");
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    pub fn git(&self) -> Option<&VaultGit> {
+        self.git.as_ref()
+    }
+
+    pub fn drafts(&self) -> &DraftManager {
+        &self.drafts
     }
 }
 

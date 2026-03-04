@@ -36,6 +36,10 @@ impl Run for IndexArgs {
             pb.finish_and_clear();
         }
 
+        if !json {
+            output::print_git_init_info(&vault);
+        }
+
         if json {
             println!(
                 "{}",

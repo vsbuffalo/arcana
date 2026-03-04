@@ -25,6 +25,9 @@ pub struct CreateArgs {
 impl Run for CreateArgs {
     fn run(self, config: ArcanaConfig, json: bool) -> Result<()> {
         let vault = Vault::open(config)?;
+        if !json {
+            crate::output::print_git_init_info(&vault);
+        }
 
         let mut fm = Frontmatter::default();
         if let Some(title) = self.title {

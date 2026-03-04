@@ -9,6 +9,10 @@ pub struct ArcanaConfig {
     pub vault: VaultConfig,
     pub index: IndexConfig,
     pub search: SearchConfig,
+    pub llm: LlmConfig,
+    pub agent: AgentSettings,
+    pub git: GitConfig,
+    pub drafts: DraftsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +42,80 @@ pub enum DbLocation {
 pub struct SearchConfig {
     pub default_limit: usize,
     pub snippet_length: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LlmConfig {
+    pub provider: String,
+    pub model: String,
+    pub api_key_env: String,
+    pub endpoint: Option<String>,
+}
+
+impl Default for LlmConfig {
+    fn default() -> Self {
+        Self {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-5-20250929".to_string(),
+            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            endpoint: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentSettings {
+    pub max_iterations: usize,
+    pub max_tokens: usize,
+    pub default_tags: Vec<String>,
+}
+
+impl Default for AgentSettings {
+    fn default() -> Self {
+        Self {
+            max_iterations: 20,
+            max_tokens: 100_000,
+            default_tags: vec!["ai-generated".to_string()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GitConfig {
+    pub enabled: bool,
+    pub auto_commit: bool,
+    pub user_name: String,
+    pub user_email: String,
+    pub ai_name: String,
+    pub ai_email: String,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auto_commit: true,
+            user_name: String::new(),
+            user_email: String::new(),
+            ai_name: "arcana-ai".to_string(),
+            ai_email: "ai@arcana.local".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DraftsConfig {
+    pub retention_days: u32,
+}
+
+impl Default for DraftsConfig {
+    fn default() -> Self {
+        Self { retention_days: 30 }
+    }
 }
 
 impl Default for VaultConfig {

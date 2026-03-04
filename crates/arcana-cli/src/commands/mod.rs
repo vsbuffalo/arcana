@@ -1,6 +1,13 @@
+pub mod blame;
+pub mod chat;
+pub mod context;
 pub mod create;
+pub mod diff;
 pub mod index;
+pub mod log;
 pub mod read;
+pub mod restore;
+pub mod review;
 pub mod search;
 pub mod serve;
 pub mod stats;
@@ -23,6 +30,20 @@ pub enum Commands {
     Stats,
     /// Start the MCP server (for Claude Code / Claude Web)
     Serve(serve::ServeArgs),
+    /// Interactive chat with your vault using an LLM
+    Chat(chat::ChatArgs),
+    /// Review and approve/reject AI-generated drafts
+    Review(review::ReviewArgs),
+    /// Show line-level provenance (human vs AI) for a note
+    Blame(blame::BlameArgs),
+    /// Generate a context block from vault search for use with LLMs
+    Context(context::ContextArgs),
+    /// Show git history for a note or the vault
+    Log(log::LogArgs),
+    /// Show uncommitted changes for a note
+    Diff(diff::DiffArgs),
+    /// Restore a note to a previous version
+    Restore(restore::RestoreArgs),
 }
 
 pub trait Run {
@@ -38,6 +59,13 @@ impl Run for Commands {
             Commands::Create(args) => args.run(config, json),
             Commands::Stats => stats::run_stats(config, json),
             Commands::Serve(args) => serve::run_serve(args, config),
+            Commands::Chat(args) => chat::run_chat(args, config),
+            Commands::Review(args) => review::run_review(args, config, json),
+            Commands::Blame(args) => blame::run_blame(args, config, json),
+            Commands::Context(args) => context::run_context(args, config),
+            Commands::Log(args) => log::run_log(args, config, json),
+            Commands::Diff(args) => diff::run_diff(args, config, json),
+            Commands::Restore(args) => restore::run_restore(args, config, json),
         }
     }
 }

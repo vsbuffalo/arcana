@@ -5,6 +5,9 @@ use crate::output;
 
 pub fn run_stats(config: ArcanaConfig, json: bool) -> Result<()> {
     let vault = Vault::open(config)?;
+    if !json {
+        crate::output::print_git_init_info(&vault);
+    }
     let stats = vault.stats()?;
 
     if json {

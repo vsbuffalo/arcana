@@ -284,7 +284,10 @@ fn duplicate_wikilinks_do_not_fail() {
     vault.index().unwrap();
 
     let stats = vault.stats().unwrap();
-    assert!(stats.total_notes >= 10, "should include the duplicate-links note");
+    assert!(
+        stats.total_notes >= 10,
+        "should include the duplicate-links note"
+    );
     assert!(stats.total_links > 0);
 }
 
