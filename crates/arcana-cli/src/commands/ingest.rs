@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
-use arcana_agent::{CostEstimate, IngestEngine, IngestEvent, IngestPlan};
+use arcana_agent::{CostEstimate, Ingest, IngestEvent, IngestPlan};
 use arcana_core::ArcanaConfig;
 use clap::Args;
 use colored::Colorize;
@@ -68,14 +68,16 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
     } else {
         None
     };
-    let domain_skill = skill.as_ref().map(|s| s.body.as_str());
+    let domain_skill = skill.as_ref().map(|s| s.body.clone());
 
-    let profile = vault.profile().clone();
+    let brain_profile = vault.profile().clone();
 
     let project_name = project_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(&args.project);
+
+    let model_name = backend.model_name().to_string();
 
     eprintln!(
         "{} {} ({})",
@@ -87,7 +89,7 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
         "{}",
         format!(
             "project: {project_name}{}{}",
-            if profile.is_empty() {
+            if brain_profile.is_empty() {
                 ""
             } else {
                 ", brain profile loaded"
@@ -106,7 +108,8 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
         max_explore_iterations: config
             .agent
             .ingest
-            .max_iterations
+            .max_explore_iterations
+            .or(config.agent.ingest.max_iterations)
             .unwrap_or(config.agent.max_iterations),
         max_tokens: config
             .agent
@@ -119,69 +122,62 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
 
     rt.block_on(async {
         let vault_arc = Arc::new(Mutex::new(vault));
-        let model_name = backend.model_name().to_string();
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let event_handle = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                handle_event(&event);
+            }
+        });
 
         // --- Phase 1+2: Explore + Plan ---
-        let (plan_result, plan_usage, estimated_gen) = {
-            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let ingest = Ingest::new(
+            backend,
+            &project_path,
+            vault_arc,
+            brain_profile,
+            domain_skill,
+            Some(event_tx),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            let event_handle = tokio::spawn(async move {
-                while let Some(event) = event_rx.recv().await {
-                    handle_explore_event(&event);
-                }
-            });
-
-            let engine = IngestEngine::new(
-                backend.as_ref(),
-                &project_path,
-                vault_arc.clone(),
-                &profile,
-                domain_skill,
-                Some(&event_tx),
-            )
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-            let explored = match engine.explore(&ingest_config).await {
-                Ok(r) => r,
-                Err(e) => {
-                    drop(event_tx);
-                    event_handle.await.ok();
-                    eprintln!("{}: {e}", "error".red().bold());
-                    std::process::exit(1);
-                }
-            };
-
-            let planned = match engine.plan(&explored.summary, explored.usage).await {
-                Ok(r) => r,
-                Err(e) => {
-                    drop(event_tx);
-                    event_handle.await.ok();
-                    eprintln!("{}: {e}", "error".red().bold());
-                    std::process::exit(1);
-                }
-            };
-
-            drop(event_tx);
-            event_handle.await.ok();
-
-            (planned.plan, planned.usage, planned.estimated_gen)
+        let ingest = match ingest.explore(&ingest_config).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}: {e}", "error".red().bold());
+                std::process::exit(1);
+            }
         };
 
-        if plan_result.notes.is_empty() {
+        let mut ingest = match ingest.plan().await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}: {e}", "error".red().bold());
+                std::process::exit(1);
+            }
+        };
+
+        // Let the event handler flush "done" before we print anything else
+        tokio::task::yield_now().await;
+
+        if ingest.plan().notes.is_empty() {
             eprintln!("  {} nothing to ingest", "→".dimmed());
             return Ok(());
         }
 
         // Show plan and cost
-        print_plan(&plan_result);
+        print_plan(ingest.plan());
 
-        let cost_est = CostEstimate::new(&model_name, plan_usage.clone(), estimated_gen.clone());
+        let cost_est = CostEstimate::new(
+            &model_name,
+            ingest.usage().clone(),
+            ingest.estimated_gen().clone(),
+        );
         print_cost_estimate(&cost_est);
         eprintln!();
 
         // --- Interactive prompt ---
-        let mut plan = plan_result;
-
         if !args.auto {
             loop {
                 eprint!(
@@ -203,10 +199,10 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
                         return Ok(());
                     }
                     "e" | "edit" => {
-                        match edit_plan(&plan, &profile) {
+                        match edit_plan(ingest.plan()) {
                             Ok(edited) => {
-                                plan = edited;
-                                if plan.notes.is_empty() {
+                                ingest = ingest.edit_plan(edited);
+                                if ingest.plan().notes.is_empty() {
                                     eprintln!(
                                         "  {} plan is empty, nothing to generate",
                                         "→".dimmed()
@@ -214,10 +210,12 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
                                     return Ok(());
                                 }
                                 eprintln!();
-                                print_plan(&plan);
-                                let est = arcana_agent::ingest::estimate_generation_usage(&plan);
-                                let cost_est =
-                                    CostEstimate::new(&model_name, plan_usage.clone(), est);
+                                print_plan(ingest.plan());
+                                let cost_est = CostEstimate::new(
+                                    &model_name,
+                                    ingest.usage().clone(),
+                                    ingest.estimated_gen().clone(),
+                                );
                                 print_cost_estimate(&cost_est);
                                 eprintln!();
                             }
@@ -234,41 +232,26 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
         }
 
         // --- Phase 3: Generate ---
-        let (gen_event_tx, mut gen_event_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let gen_handle = tokio::spawn(async move {
-            while let Some(event) = gen_event_rx.recv().await {
-                handle_generate_event(&event);
-            }
-        });
-
-        let engine = IngestEngine::new(
-            backend.as_ref(),
-            &project_path,
-            vault_arc,
-            &profile,
-            domain_skill,
-            Some(&gen_event_tx),
-        )
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let result = engine.generate(&plan, plan_usage).await;
-
-        drop(gen_event_tx);
-        gen_handle.await.ok();
+        let result = ingest.generate().await;
 
         match result {
-            Ok(generated) => {
+            Ok(done) => {
+                let session_id = done.session_id().unwrap_or("unknown");
                 let drafts_dir = config
                     .vault
                     .path
                     .join(".arcana")
                     .join("drafts")
-                    .join(&generated.session_id);
+                    .join(session_id);
                 eprintln!("  {}:", "drafts".dimmed());
-                for path in &generated.drafted_paths {
+                for path in done.drafted() {
                     eprintln!("    {}", drafts_dir.join(path).display());
                 }
+
+                // Drop done to close the event channel
+                drop(done);
+                event_handle.await.ok();
+
                 Ok(())
             }
             Err(e) => {
@@ -279,7 +262,7 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
     })
 }
 
-fn handle_explore_event(event: &IngestEvent) {
+fn handle_event(event: &IngestEvent) {
     match event {
         IngestEvent::ExploreStart => {
             eprint!("  {} exploring project... ", "→".dimmed());
@@ -308,15 +291,6 @@ fn handle_explore_event(event: &IngestEvent) {
         IngestEvent::PlanReady { .. } => {
             eprintln!("{}", "done".green());
         }
-        IngestEvent::Error { ref message } => {
-            eprintln!("  {}: {message}", "warning".yellow().bold());
-        }
-        _ => {}
-    }
-}
-
-fn handle_generate_event(event: &IngestEvent) {
-    match event {
         IngestEvent::GenerateStart { total } => {
             eprintln!();
             eprintln!(
@@ -354,14 +328,10 @@ fn handle_generate_event(event: &IngestEvent) {
         IngestEvent::Error { ref message } => {
             eprintln!("  {}: {message}", "warning".yellow().bold());
         }
-        _ => {}
     }
 }
 
-fn edit_plan(
-    plan: &IngestPlan,
-    profile: &arcana_core::BrainProfile,
-) -> Result<IngestPlan> {
+fn edit_plan(plan: &IngestPlan) -> Result<IngestPlan> {
     let toml_str = toml::to_string_pretty(plan)?;
 
     let header = "# Edit the ingest plan below.\n\
@@ -404,33 +374,6 @@ fn edit_plan(
                 continue;
             }
         };
-
-        // Validate zones
-        let zones = profile.zones();
-        let projects = profile.projects();
-        if !zones.is_empty() {
-            let mut zone_errors = Vec::new();
-            for note in &edited.notes {
-                if let Err(e) =
-                    arcana_core::writer::validate_zone(&note.path, &zones, &projects)
-                {
-                    zone_errors.push(format!("  {}: {e}", note.path));
-                }
-            }
-            if !zone_errors.is_empty() {
-                eprintln!("  {}: invalid zones", "error".red().bold());
-                for err in &zone_errors {
-                    eprintln!("    {err}");
-                }
-                eprintln!(
-                    "  {} allowed zones: {}",
-                    "hint:".dimmed(),
-                    zones.join(", ").dimmed()
-                );
-                eprintln!("  {} reopening editor...", "→".dimmed());
-                continue;
-            }
-        }
 
         return Ok(edited);
     }

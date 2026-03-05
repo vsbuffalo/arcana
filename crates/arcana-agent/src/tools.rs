@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use crate::permissions::{ApprovalResult, ToolPermission};
+use async_trait::async_trait;
+
+use crate::executor::ToolExecutor;
 use crate::types::ToolDef;
 use arcana_core::{
     AiMeta, Confidence, Frontmatter, SearchFilters, SearchQuery, SearchResult, SessionMeta, Vault,
@@ -24,41 +26,25 @@ pub struct SessionContext {
 // VaultToolExecutor
 // ---------------------------------------------------------------------------
 
-/// Function type for permission checking.
-pub type PermissionsFn = dyn Fn(&str) -> ToolPermission + Send + Sync;
-
-/// Function type for approval callbacks.
-pub type ApprovalFn = dyn Fn(&str, &str, &serde_json::Value) -> ApprovalResult + Send + Sync;
-
 pub struct VaultToolExecutor {
     vault: Arc<Mutex<Vault>>,
     session: SessionContext,
-    permissions_fn: Option<Box<PermissionsFn>>,
-    approval_fn: Option<Box<ApprovalFn>>,
 }
 
 impl VaultToolExecutor {
     pub fn new(vault: Arc<Mutex<Vault>>, session: SessionContext) -> Self {
-        Self {
-            vault,
-            session,
-            permissions_fn: None,
-            approval_fn: None,
-        }
+        Self { vault, session }
     }
 
-    pub fn with_permissions(mut self, f: Box<PermissionsFn>) -> Self {
-        self.permissions_fn = Some(f);
-        self
-    }
-
-    pub fn with_approval(mut self, f: Box<ApprovalFn>) -> Self {
-        self.approval_fn = Some(f);
-        self
-    }
-
-    pub fn tool_defs() -> Vec<ToolDef> {
-        Self::base_tool_defs()
+    /// All tool defs including read + write tools.
+    pub fn base_tool_defs() -> Vec<ToolDef> {
+        vec![
+            Self::search_def(),
+            Self::read_def(),
+            Self::create_def(),
+            Self::update_def(),
+            Self::list_def(),
+        ]
     }
 
     /// Read-only tool defs for ingest exploration (no create/update/draft).
@@ -127,73 +113,70 @@ impl VaultToolExecutor {
         defs
     }
 
-    fn base_tool_defs() -> Vec<ToolDef> {
-        vec![
-            Self::search_def(),
-            Self::read_def(),
-            ToolDef {
-                name: "vault_create".into(),
-                description: "Create a new note with optional title, tags, and markdown body."
-                    .into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Relative path for the new note"
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Note title (stored in frontmatter)"
-                        },
-                        "body": {
-                            "type": "string",
-                            "description": "Markdown body content"
-                        },
-                        "tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Tags for the note"
-                        }
+    fn create_def() -> ToolDef {
+        ToolDef {
+            name: "vault_create".into(),
+            description: "Create a new note with optional title, tags, and markdown body.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path for the new note"
                     },
-                    "required": ["path", "body"]
-                }),
-            },
-            ToolDef {
-                name: "vault_update".into(),
-                description:
-                    "Update an existing note. Can replace body, append text, or modify tags.".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Relative path to the existing note"
-                        },
-                        "body": {
-                            "type": "string",
-                            "description": "New body content (replaces existing)"
-                        },
-                        "append": {
-                            "type": "string",
-                            "description": "Text to append to the note"
-                        },
-                        "add_tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Tags to add"
-                        },
-                        "remove_tags": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Tags to remove"
-                        }
+                    "title": {
+                        "type": "string",
+                        "description": "Note title (stored in frontmatter)"
                     },
-                    "required": ["path"]
-                }),
-            },
-            Self::list_def(),
-        ]
+                    "body": {
+                        "type": "string",
+                        "description": "Markdown body content"
+                    },
+                    "tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags for the note"
+                    }
+                },
+                "required": ["path", "body"]
+            }),
+        }
+    }
+
+    fn update_def() -> ToolDef {
+        ToolDef {
+            name: "vault_update".into(),
+            description:
+                "Update an existing note. Can replace body, append text, or modify tags.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Relative path to the existing note"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "New body content (replaces existing)"
+                    },
+                    "append": {
+                        "type": "string",
+                        "description": "Text to append to the note"
+                    },
+                    "add_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags to add"
+                    },
+                    "remove_tags": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Tags to remove"
+                    }
+                },
+                "required": ["path"]
+            }),
+        }
     }
 
     fn search_def() -> ToolDef {
@@ -270,41 +253,7 @@ impl VaultToolExecutor {
         }
     }
 
-    pub async fn execute(
-        &self,
-        tool_name: &str,
-        input: &serde_json::Value,
-    ) -> std::result::Result<String, String> {
-        // Check permissions if a permissions function is set
-        if let Some(ref perm_fn) = self.permissions_fn {
-            match perm_fn(tool_name) {
-                ToolPermission::Free => {}
-                ToolPermission::RequiresApproval => {
-                    if let Some(ref approval_fn) = self.approval_fn {
-                        let desc = format_tool_description(tool_name, input);
-                        match approval_fn(tool_name, &desc, input) {
-                            ApprovalResult::Approve => {}
-                            ApprovalResult::Reject(reason) => {
-                                return Err(format!("tool {tool_name} rejected: {reason}"));
-                            }
-                            ApprovalResult::Edit(new_input) => {
-                                return self.dispatch(tool_name, &new_input).await;
-                            }
-                        }
-                    }
-                }
-                ToolPermission::Blocked => {
-                    return Err(format!(
-                        "Tool '{tool_name}' is not available in this mode. Use vault_draft instead."
-                    ));
-                }
-            }
-        }
-
-        self.dispatch(tool_name, input).await
-    }
-
-    async fn dispatch(
+    pub(crate) async fn dispatch(
         &self,
         tool_name: &str,
         input: &serde_json::Value,
@@ -624,28 +573,25 @@ impl VaultToolExecutor {
     }
 }
 
-fn format_tool_description(tool_name: &str, input: &serde_json::Value) -> String {
-    match tool_name {
-        "vault_draft" => {
-            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("Create draft note: {path}")
-        }
-        "vault_suggest_edit" => {
-            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-            let reason = input.get("reason").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("Suggest edit to {path}: {reason}")
-        }
-        _ => tool_name.to_string(),
+#[async_trait]
+impl ToolExecutor for VaultToolExecutor {
+    async fn execute(&self, name: &str, input: &serde_json::Value) -> Result<String, String> {
+        self.dispatch(name, input).await
+    }
+
+    fn tool_defs(&self) -> Vec<ToolDef> {
+        Self::base_tool_defs()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::PermissionedExecutor;
 
     #[test]
     fn tool_defs_are_valid_json() {
-        let defs = VaultToolExecutor::tool_defs();
+        let defs = VaultToolExecutor::base_tool_defs();
         assert_eq!(defs.len(), 5);
         for def in &defs {
             assert!(!def.name.is_empty());
@@ -695,7 +641,7 @@ mod tests {
         std::fs::write(dir.path().join("test.md"), "test").unwrap();
         let config = arcana_core::ArcanaConfig::default().with_vault_path(dir.path().to_path_buf());
         let vault = Vault::open(config).unwrap();
-        let executor = VaultToolExecutor::new(
+        let inner = VaultToolExecutor::new(
             Arc::new(Mutex::new(vault)),
             SessionContext {
                 session_id: "test".into(),
@@ -703,8 +649,11 @@ mod tests {
                 model: "test".into(),
                 provider: "test".into(),
             },
-        )
-        .with_permissions(Box::new(crate::permissions::chat_permissions));
+        );
+        let executor = PermissionedExecutor::new(
+            inner,
+            Box::new(crate::permissions::chat_permissions),
+        );
 
         let result = executor
             .execute(

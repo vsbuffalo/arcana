@@ -6,13 +6,14 @@ use tracing::debug;
 use crate::agent::{AgentConfig, AgentEvent};
 use crate::backend::LlmBackend;
 use crate::error::Result;
+use crate::executor::{PermissionedExecutor, ToolExecutor};
 use crate::permissions::{chat_permissions, ApprovalResult};
 use crate::tools::{SessionContext, VaultToolExecutor};
 use crate::types::{ContentBlock, Message, StopReason, ToolDef, Usage};
 use arcana_core::{BrainProfile, Vault};
 
 /// Callback type for approval requests.
-pub type ApprovalFn<'a> = &'a dyn Fn(&str, &str, &serde_json::Value) -> ApprovalResult;
+pub type ApprovalFn<'a> = &'a (dyn Fn(&str, &str, &serde_json::Value) -> ApprovalResult + Send + Sync);
 
 /// Response from a chat turn.
 pub struct ChatResponse {
@@ -64,7 +65,7 @@ impl ChatSession {
     ) -> Result<ChatResponse> {
         self.messages.push(Message::user(user_message));
 
-        let executor = VaultToolExecutor::new(
+        let vault_executor = VaultToolExecutor::new(
             self.vault.clone(),
             SessionContext {
                 session_id: self.session_id.clone(),
@@ -73,6 +74,15 @@ impl ChatSession {
                 provider: self.llm.provider_name().to_string(),
             },
         );
+
+        let mut permissioned =
+            PermissionedExecutor::new(vault_executor, Box::new(chat_permissions));
+        if let Some(af) = approval_fn {
+            permissioned = permissioned.with_approval(Box::new(move |name, desc, input| {
+                af(name, desc, input)
+            }));
+        }
+        let executor: &dyn ToolExecutor = &permissioned;
 
         let mut total_usage = Usage::default();
         let mut tools_used = Vec::new();
@@ -102,7 +112,6 @@ impl ChatSession {
             if response.stop_reason == StopReason::EndTurn
                 || response.stop_reason == StopReason::MaxTokens
             {
-                // Add assistant message to history
                 self.messages.push(Message::assistant(response.content));
                 break;
             }
@@ -120,11 +129,10 @@ impl ChatSession {
                 break;
             }
 
-            // Add assistant message
             self.messages
                 .push(Message::assistant(response.content.clone()));
 
-            // Execute tools
+            // Execute tools via PermissionedExecutor
             let mut results = Vec::new();
             for call in &tool_calls {
                 if let ContentBlock::ToolUse { id, name, input } = call {
@@ -132,69 +140,33 @@ impl ChatSession {
                         let _ = tx.send(AgentEvent::ToolStart { name: name.clone() });
                     }
 
-                    // For tools requiring approval, check with the callback
-                    let perm = chat_permissions(name);
-                    let mut should_execute = true;
-                    let mut effective_input = input.clone();
+                    let result = executor.execute(name, input).await;
 
-                    if perm == crate::permissions::ToolPermission::RequiresApproval {
-                        if let Some(af) = approval_fn {
-                            let desc = format_tool_description(name, input);
-                            match af(name, &desc, input) {
-                                ApprovalResult::Approve => {}
-                                ApprovalResult::Reject(reason) => {
-                                    results.push(ContentBlock::ToolResult {
-                                        tool_use_id: id.clone(),
-                                        content: format!("Rejected by user: {reason}"),
-                                        is_error: true,
-                                    });
-                                    should_execute = false;
-                                }
-                                ApprovalResult::Edit(new_input) => {
-                                    effective_input = new_input;
+                    match &result {
+                        Ok(output) => {
+                            debug!("tool {name} ok: {}...", &output[..output.len().min(100)]);
+
+                            // Track drafts
+                            if name == "vault_draft" || name == "vault_suggest_edit" {
+                                if let Some(path) =
+                                    input.get("path").and_then(|v| v.as_str())
+                                {
+                                    drafts_created.push(path.to_string());
                                 }
                             }
+
+                            results.push(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: output.clone(),
+                                is_error: false,
+                            });
                         }
-                    } else if perm == crate::permissions::ToolPermission::Blocked {
-                        results.push(ContentBlock::ToolResult {
-                            tool_use_id: id.clone(),
-                            content: format!(
-                                "Tool '{name}' is not available in chat mode. Use vault_draft instead."
-                            ),
-                            is_error: true,
-                        });
-                        should_execute = false;
-                    }
-
-                    if should_execute {
-                        let result = executor.execute(name, &effective_input).await;
-
-                        match &result {
-                            Ok(output) => {
-                                debug!("tool {name} ok: {}...", &output[..output.len().min(100)]);
-
-                                // Track drafts
-                                if name == "vault_draft" || name == "vault_suggest_edit" {
-                                    if let Some(path) =
-                                        effective_input.get("path").and_then(|v| v.as_str())
-                                    {
-                                        drafts_created.push(path.to_string());
-                                    }
-                                }
-
-                                results.push(ContentBlock::ToolResult {
-                                    tool_use_id: id.clone(),
-                                    content: output.clone(),
-                                    is_error: false,
-                                });
-                            }
-                            Err(err) => {
-                                results.push(ContentBlock::ToolResult {
-                                    tool_use_id: id.clone(),
-                                    content: err.clone(),
-                                    is_error: true,
-                                });
-                            }
+                        Err(err) => {
+                            results.push(ContentBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content: err.clone(),
+                                is_error: true,
+                            });
                         }
                     }
 
@@ -239,21 +211,6 @@ impl ChatSession {
 
     pub fn vault_ref(&self) -> Arc<Mutex<Vault>> {
         self.vault.clone()
-    }
-}
-
-fn format_tool_description(tool_name: &str, input: &serde_json::Value) -> String {
-    match tool_name {
-        "vault_draft" => {
-            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("Create draft note: {path}")
-        }
-        "vault_suggest_edit" => {
-            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("?");
-            let reason = input.get("reason").and_then(|v| v.as_str()).unwrap_or("?");
-            format!("Suggest edit to {path}: {reason}")
-        }
-        _ => tool_name.to_string(),
     }
 }
 

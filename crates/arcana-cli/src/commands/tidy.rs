@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
-use arcana_agent::{CostEstimate, TidyEngine, TidyEvent, TidyPlan};
+use arcana_agent::{CostEstimate, Tidy, TidyEvent, TidyPlan};
 use arcana_core::{ArcanaConfig, SearchFilters, SearchResult};
 use clap::Args;
 use colored::Colorize;
@@ -61,7 +61,8 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
         )
     })?;
 
-    let profile = vault.profile().clone();
+    let brain_profile = vault.profile().clone();
+    let model_name = backend.model_name().to_string();
 
     eprintln!(
         "{} {} ({})",
@@ -75,7 +76,7 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
             "target: {} note{}{}",
             target_paths.len(),
             if target_paths.len() == 1 { "" } else { "s" },
-            if profile.is_empty() {
+            if brain_profile.is_empty() {
                 ""
             } else {
                 ", brain profile loaded"
@@ -85,7 +86,7 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
     );
     eprintln!();
 
-    let tidy_config = arcana_agent::TidyConfig {
+    let _tidy_config = arcana_agent::TidyConfig {
         max_tokens: config
             .agent
             .tidy
@@ -97,76 +98,60 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
 
     rt.block_on(async {
         let vault_arc = Arc::new(Mutex::new(vault));
-        let model_name = backend.model_name().to_string();
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let event_handle = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                handle_event(&event);
+            }
+        });
 
         // --- Phase 1+2: Survey + Plan ---
-        let (plan_result, plan_usage, estimated_gen, sources, vault_context) = {
-            let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let tidy = Tidy::new(
+            backend,
+            vault_arc,
+            brain_profile,
+            None,
+            Some(event_tx),
+        );
 
-            let event_handle = tokio::spawn(async move {
-                while let Some(event) = event_rx.recv().await {
-                    handle_plan_event(&event);
-                }
-            });
-
-            let engine = TidyEngine::new(
-                backend.as_ref(),
-                vault_arc.clone(),
-                &profile,
-                None,
-                Some(&event_tx),
-            );
-
-            let surveyed = match engine.survey(&target_paths).await {
-                Ok(r) => r,
-                Err(e) => {
-                    drop(event_tx);
-                    event_handle.await.ok();
-                    eprintln!("{}: {e}", "error".red().bold());
-                    std::process::exit(1);
-                }
-            };
-
-            let planned = match engine.plan(&surveyed.sources, &surveyed.vault_context).await {
-                Ok(r) => r,
-                Err(e) => {
-                    drop(event_tx);
-                    event_handle.await.ok();
-                    eprintln!("{}: {e}", "error".red().bold());
-                    std::process::exit(1);
-                }
-            };
-
-            drop(event_tx);
-            event_handle.await.ok();
-
-            (
-                planned.plan,
-                planned.usage,
-                planned.estimated_gen,
-                surveyed.sources,
-                surveyed.vault_context,
-            )
+        let tidy = match tidy.survey(&target_paths).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}: {e}", "error".red().bold());
+                std::process::exit(1);
+            }
         };
 
-        // Suppress unused warning
-        let _ = &tidy_config;
+        let mut tidy = match tidy.plan().await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}: {e}", "error".red().bold());
+                std::process::exit(1);
+            }
+        };
 
-        if plan_result.actions.is_empty() {
+        // Let the event handler flush "done" before we print anything else
+        tokio::task::yield_now().await;
+
+        if tidy.plan().actions.is_empty() {
             eprintln!("  {} nothing to tidy", "→".dimmed());
             return Ok(());
         }
 
         // Show plan and cost
-        print_plan(&plan_result);
+        print_plan(tidy.plan());
 
-        let cost_est = CostEstimate::new(&model_name, plan_usage.clone(), estimated_gen.clone());
+        let cost_est = CostEstimate::new(
+            &model_name,
+            tidy.usage().clone(),
+            tidy.estimated_gen().clone(),
+        );
         print_cost_estimate(&cost_est);
         eprintln!();
 
         // --- Interactive prompt ---
-        let mut plan = plan_result;
-
         if !args.auto {
             loop {
                 eprint!(
@@ -188,10 +173,10 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
                         return Ok(());
                     }
                     "e" | "edit" => {
-                        match edit_plan(&plan, &profile) {
+                        match edit_plan(tidy.plan()) {
                             Ok(edited) => {
-                                plan = edited;
-                                if plan.actions.is_empty() {
+                                tidy = tidy.edit_plan(edited);
+                                if tidy.plan().actions.is_empty() {
                                     eprintln!(
                                         "  {} plan is empty, nothing to generate",
                                         "→".dimmed()
@@ -199,12 +184,12 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
                                     return Ok(());
                                 }
                                 eprintln!();
-                                print_plan(&plan);
-                                let est = arcana_agent::tidy::estimate_generation_usage(
-                                    &plan, &sources,
+                                print_plan(tidy.plan());
+                                let cost_est = CostEstimate::new(
+                                    &model_name,
+                                    tidy.usage().clone(),
+                                    tidy.estimated_gen().clone(),
                                 );
-                                let cost_est =
-                                    CostEstimate::new(&model_name, plan_usage.clone(), est);
                                 print_cost_estimate(&cost_est);
                                 eprintln!();
                             }
@@ -221,41 +206,26 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
         }
 
         // --- Phase 3: Generate ---
-        let (gen_event_tx, mut gen_event_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let gen_handle = tokio::spawn(async move {
-            while let Some(event) = gen_event_rx.recv().await {
-                handle_generate_event(&event);
-            }
-        });
-
-        let engine = TidyEngine::new(
-            backend.as_ref(),
-            vault_arc,
-            &profile,
-            None,
-            Some(&gen_event_tx),
-        );
-
-        let result = engine
-            .generate(&plan, &sources, &vault_context, plan_usage)
-            .await;
-
-        drop(gen_event_tx);
-        gen_handle.await.ok();
+        let result = tidy.generate().await;
 
         match result {
-            Ok(generated) => {
+            Ok(done) => {
+                let session_id = done.session_id().unwrap_or("unknown");
                 let drafts_dir = config
                     .vault
                     .path
                     .join(".arcana")
                     .join("drafts")
-                    .join(&generated.session_id);
+                    .join(session_id);
                 eprintln!("  {}:", "drafts".dimmed());
-                for path in &generated.drafted_paths {
+                for path in done.drafted() {
                     eprintln!("    {}", drafts_dir.join(path).display());
                 }
+
+                // Drop done to close the event channel
+                drop(done);
+                event_handle.await.ok();
+
                 Ok(())
             }
             Err(e) => {
@@ -266,7 +236,7 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
     })
 }
 
-fn handle_plan_event(event: &TidyEvent) {
+fn handle_event(event: &TidyEvent) {
     match event {
         TidyEvent::SurveyStart { count } => {
             eprint!(
@@ -308,15 +278,6 @@ fn handle_plan_event(event: &TidyEvent) {
                 existing_model.dimmed()
             );
         }
-        TidyEvent::Error { ref message } => {
-            eprintln!("{}: {message}", "error".red().bold());
-        }
-        _ => {}
-    }
-}
-
-fn handle_generate_event(event: &TidyEvent) {
-    match event {
         TidyEvent::GenerateStart { total } => {
             eprintln!();
             eprintln!(
@@ -354,13 +315,11 @@ fn handle_generate_event(event: &TidyEvent) {
         TidyEvent::Error { ref message } => {
             eprintln!("{}: {message}", "error".red().bold());
         }
-        _ => {}
     }
 }
 
 fn edit_plan(
     plan: &TidyPlan,
-    profile: &arcana_core::BrainProfile,
 ) -> Result<TidyPlan> {
     let toml_str = toml::to_string_pretty(plan)?;
 
@@ -404,34 +363,6 @@ fn edit_plan(
                 continue;
             }
         };
-
-        // Validate zones
-        let zones = profile.zones();
-        let projects = profile.projects();
-        if !zones.is_empty() {
-            let output_paths = edited.output_paths();
-            let mut zone_errors = Vec::new();
-            for path in &output_paths {
-                if let Err(e) =
-                    arcana_core::writer::validate_zone(path, &zones, &projects)
-                {
-                    zone_errors.push(format!("  {path}: {e}"));
-                }
-            }
-            if !zone_errors.is_empty() {
-                eprintln!("  {}: invalid zones", "error".red().bold());
-                for err in &zone_errors {
-                    eprintln!("    {err}");
-                }
-                eprintln!(
-                    "  {} allowed zones: {}",
-                    "hint:".dimmed(),
-                    zones.join(", ").dimmed()
-                );
-                eprintln!("  {} reopening editor...", "→".dimmed());
-                continue;
-            }
-        }
 
         return Ok(edited);
     }

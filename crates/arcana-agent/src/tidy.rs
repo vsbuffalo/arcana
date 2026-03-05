@@ -161,129 +161,172 @@ pub struct SourceNote {
     pub content: String,
 }
 
-/// Compute a stable hash of source notes for deduplication across runs.
-fn hash_sources(sources: &[SourceNote]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    for s in sources {
-        s.path.hash(&mut hasher);
-        s.content.hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
-}
-
 // ---------------------------------------------------------------------------
-// Phase result types
+// Phase marker types
 // ---------------------------------------------------------------------------
 
-pub struct SurveyResult {
+pub struct Unsurveyed;
+
+pub struct Surveyed {
     pub sources: Vec<SourceNote>,
     pub vault_context: String,
 }
 
-pub struct TidyPlanResult {
+pub struct TidyPlanned {
     pub plan: TidyPlan,
+    pub sources: Vec<SourceNote>,
+    pub vault_context: String,
     pub usage: Usage,
     pub estimated_gen: Usage,
 }
 
-pub struct TidyGenerateResult {
-    pub session_id: String,
-    pub drafted_paths: Vec<String>,
+pub struct TidyDone {
+    pub plan: TidyPlan,
+    pub session_id: Option<String>,
+    pub drafted: Vec<String>,
     pub usage: Usage,
 }
 
 // ---------------------------------------------------------------------------
-// TidyEngine
+// Shared context (owned, no lifetimes)
 // ---------------------------------------------------------------------------
 
-pub struct TidyEngine<'a> {
-    llm: &'a dyn LlmBackend,
+struct TidyInner {
+    llm: Box<dyn LlmBackend>,
     vault: Arc<Mutex<Vault>>,
-    profile: &'a BrainProfile,
-    domain_skill: Option<&'a str>,
-    event_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
+    profile: BrainProfile,
+    domain_skill: Option<String>,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
 }
 
-impl<'a> TidyEngine<'a> {
+// ---------------------------------------------------------------------------
+// Tidy pipeline (typestate)
+// ---------------------------------------------------------------------------
+
+pub struct Tidy<Phase> {
+    pub phase: Phase,
+    inner: TidyInner,
+}
+
+impl<P> Tidy<P> {
+    pub fn model_name(&self) -> &str {
+        self.inner.llm.model_name()
+    }
+
+    pub fn provider_name(&self) -> &str {
+        self.inner.llm.provider_name()
+    }
+}
+
+impl Tidy<Unsurveyed> {
     pub fn new(
-        llm: &'a dyn LlmBackend,
+        llm: Box<dyn LlmBackend>,
         vault: Arc<Mutex<Vault>>,
-        profile: &'a BrainProfile,
-        domain_skill: Option<&'a str>,
-        event_tx: Option<&'a tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
+        profile: BrainProfile,
+        domain_skill: Option<String>,
+        event_tx: Option<tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
     ) -> Self {
         Self {
-            llm,
-            vault,
-            profile,
-            domain_skill,
-            event_tx,
+            phase: Unsurveyed,
+            inner: TidyInner {
+                llm,
+                vault,
+                profile,
+                domain_skill,
+                event_tx,
+            },
         }
     }
 
-    pub fn model_name(&self) -> &str {
-        self.llm.model_name()
-    }
-
-    pub async fn survey(&self, target_paths: &[String]) -> Result<SurveyResult> {
+    pub async fn survey(self, target_paths: &[String]) -> Result<Tidy<Surveyed>> {
         let (sources, vault_context) = {
-            let v = self.vault.lock().await;
-            run_survey(&v, target_paths, self.event_tx)?
+            let v = self.inner.vault.lock().await;
+            run_survey(&v, target_paths, self.inner.event_tx.as_ref())?
         };
 
         if sources.is_empty() {
             return Err(AgentError::Config("no notes found to tidy".into()));
         }
 
-        Ok(SurveyResult {
-            sources,
-            vault_context,
+        Ok(Tidy {
+            phase: Surveyed {
+                sources,
+                vault_context,
+            },
+            inner: self.inner,
         })
     }
+}
 
-    pub async fn plan(
-        &self,
-        sources: &[SourceNote],
-        vault_context: &str,
-    ) -> Result<TidyPlanResult> {
+impl Tidy<Surveyed> {
+    pub fn sources(&self) -> &[SourceNote] {
+        &self.phase.sources
+    }
+
+    pub fn vault_context(&self) -> &str {
+        &self.phase.vault_context
+    }
+
+    pub async fn plan(self) -> Result<Tidy<TidyPlanned>> {
         let (plan, plan_usage) = run_plan_tidy(
-            self.llm,
-            sources,
-            vault_context,
-            self.profile,
-            self.domain_skill,
-            self.event_tx,
+            self.inner.llm.as_ref(),
+            &self.phase.sources,
+            &self.phase.vault_context,
+            &self.inner.profile,
+            self.inner.domain_skill.as_deref(),
+            self.inner.event_tx.as_ref(),
         )
         .await?;
 
-        let estimated_gen = estimate_generation_usage(&plan, sources);
+        let estimated_gen = estimate_generation_usage(&plan, &self.phase.sources);
 
-        Ok(TidyPlanResult {
-            plan,
-            usage: plan_usage,
-            estimated_gen,
+        Ok(Tidy {
+            phase: TidyPlanned {
+                plan,
+                sources: self.phase.sources,
+                vault_context: self.phase.vault_context,
+                usage: plan_usage,
+                estimated_gen,
+            },
+            inner: self.inner,
         })
     }
+}
 
-    pub async fn generate(
-        &self,
-        plan: &TidyPlan,
-        sources: &[SourceNote],
-        vault_context: &str,
-        plan_usage: Usage,
-    ) -> Result<TidyGenerateResult> {
-        let input_hash = hash_sources(sources);
-        let gen_tasks = generation_tasks(plan, sources);
-        let target_desc: Vec<&str> = sources.iter().map(|s| s.path.as_str()).collect();
+impl Tidy<TidyPlanned> {
+    pub fn plan(&self) -> &TidyPlan {
+        &self.phase.plan
+    }
+
+    pub fn sources(&self) -> &[SourceNote] {
+        &self.phase.sources
+    }
+
+    pub fn usage(&self) -> &Usage {
+        &self.phase.usage
+    }
+
+    pub fn estimated_gen(&self) -> &Usage {
+        &self.phase.estimated_gen
+    }
+
+    /// Replace the plan (Planned → Planned self-transition). Recomputes estimated cost.
+    pub fn edit_plan(mut self, new_plan: TidyPlan) -> Self {
+        self.phase.estimated_gen = estimate_generation_usage(&new_plan, &self.phase.sources);
+        self.phase.plan = new_plan;
+        self
+    }
+
+    pub async fn generate(self) -> Result<Tidy<TidyDone>> {
+        let input_hash = hash_sources(&self.phase.sources);
+        let gen_tasks = generation_tasks(&self.phase.plan, &self.phase.sources);
+        let target_desc: Vec<&str> = self.phase.sources.iter().map(|s| s.path.as_str()).collect();
 
         // Conflict detection
         {
-            let v = self.vault.lock().await;
+            let v = self.inner.vault.lock().await;
             let drafts = v.drafts();
-            let output_paths = plan.output_paths();
+            let output_paths = self.phase.plan.output_paths();
 
             let sessions = drafts.list_sessions().map_err(AgentError::Vault)?;
             for session in &sessions {
@@ -291,7 +334,7 @@ impl<'a> TidyEngine<'a> {
                     if let Some(ref h) = session.input_hash {
                         if *h == input_hash {
                             send_event(
-                                self.event_tx,
+                                self.inner.event_tx.as_ref(),
                                 TidyEvent::SameInputWarning {
                                     existing_session: session.id.clone(),
                                     existing_model: format!(
@@ -310,7 +353,7 @@ impl<'a> TidyEngine<'a> {
                     let model = format!("{}/{}", info.provider, info.model);
                     for path in paths {
                         send_event(
-                            self.event_tx,
+                            self.inner.event_tx.as_ref(),
                             TidyEvent::ConflictWarning {
                                 path,
                                 existing_session: sid.clone(),
@@ -324,55 +367,116 @@ impl<'a> TidyEngine<'a> {
 
         // Create session and generate
         let (session_id, drafted_paths, gen_usage) = {
-            let v = self.vault.lock().await;
+            let v = self.inner.vault.lock().await;
             let drafts = v.drafts();
 
             let session_id = drafts
                 .create_session(SessionMeta {
                     source: "tidy".to_string(),
-                    provider: self.llm.provider_name().to_string(),
-                    model: self.llm.model_name().to_string(),
+                    provider: self.inner.llm.provider_name().to_string(),
+                    model: self.inner.llm.model_name().to_string(),
                     task: format!("tidy {}", target_desc.join(", ")),
                     input_hash: Some(input_hash),
                 })
                 .map_err(AgentError::Vault)?;
 
             let (drafted_paths, gen_usage) = run_generate(
-                self.llm,
+                self.inner.llm.as_ref(),
                 &gen_tasks,
-                vault_context,
-                self.profile,
-                self.domain_skill,
+                &self.phase.vault_context,
+                &self.inner.profile,
+                self.inner.domain_skill.as_deref(),
                 drafts,
                 &session_id,
-                self.event_tx,
+                self.inner.event_tx.as_ref(),
             )
             .await?;
 
             (session_id, drafted_paths, gen_usage)
         };
 
-        let mut total_usage = plan_usage;
+        let mut total_usage = self.phase.usage;
         total_usage.accumulate(&gen_usage);
 
         send_event(
-            self.event_tx,
+            self.inner.event_tx.as_ref(),
             TidyEvent::Done {
                 session_id: session_id.clone(),
                 usage: total_usage.clone(),
             },
         );
 
-        Ok(TidyGenerateResult {
-            session_id,
-            drafted_paths,
-            usage: total_usage,
+        Ok(Tidy {
+            phase: TidyDone {
+                plan: self.phase.plan,
+                session_id: Some(session_id),
+                drafted: drafted_paths,
+                usage: total_usage,
+            },
+            inner: self.inner,
         })
     }
 
-    pub fn estimate_generation(&self, plan: &TidyPlan, sources: &[SourceNote]) -> Usage {
-        estimate_generation_usage(plan, sources)
+    /// Skip generate phase when the plan is empty.
+    fn skip_generate(self) -> Tidy<TidyDone> {
+        Tidy {
+            phase: TidyDone {
+                plan: self.phase.plan,
+                session_id: None,
+                drafted: Vec::new(),
+                usage: self.phase.usage,
+            },
+            inner: self.inner,
+        }
     }
+}
+
+impl Tidy<TidyDone> {
+    pub fn plan(&self) -> &TidyPlan {
+        &self.phase.plan
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        self.phase.session_id.as_deref()
+    }
+
+    pub fn drafted(&self) -> &[String] {
+        &self.phase.drafted
+    }
+
+    pub fn usage(&self) -> &Usage {
+        &self.phase.usage
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrapper
+// ---------------------------------------------------------------------------
+
+/// Run the full tidy pipeline: survey → plan → generate → drafts.
+pub async fn run_tidy_auto(
+    llm: Box<dyn LlmBackend>,
+    vault: Arc<Mutex<Vault>>,
+    target_paths: Vec<String>,
+    profile: BrainProfile,
+    domain_skill: Option<String>,
+    config: &TidyConfig,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
+) -> Result<Tidy<TidyDone>> {
+    // config reserved for future use (e.g. max_tokens guard)
+    let _ = config;
+
+    let tidy = Tidy::new(llm, vault, profile, domain_skill, event_tx)
+        .survey(&target_paths)
+        .await?
+        .plan()
+        .await?;
+
+    if tidy.plan().actions.is_empty() {
+        return Ok(tidy.skip_generate());
+    }
+
+    tidy.generate().await
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +761,19 @@ fn generation_tasks(plan: &TidyPlan, sources: &[SourceNote]) -> Vec<GenerationTa
     tasks
 }
 
+/// Compute a stable hash of source notes for deduplication across runs.
+fn hash_sources(sources: &[SourceNote]) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    for s in sources {
+        s.path.hash(&mut hasher);
+        s.content.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_generate(
     llm: &dyn LlmBackend,
@@ -766,68 +883,6 @@ async fn run_generate(
     }
 
     Ok((drafted_paths, total_usage))
-}
-
-// ---------------------------------------------------------------------------
-// Convenience wrapper
-// ---------------------------------------------------------------------------
-
-/// Result of a tidy run.
-pub struct TidyResult {
-    pub plan: TidyPlan,
-    pub session_id: Option<String>,
-    pub drafted_paths: Vec<String>,
-    pub usage: Usage,
-}
-
-/// Run the full tidy pipeline: survey → plan → generate → drafts.
-///
-/// Thin wrapper over `TidyEngine` — calls all phases and returns
-/// the combined result. Used by tests and `--auto` mode.
-pub async fn run_tidy(
-    llm: &dyn LlmBackend,
-    vault: Arc<Mutex<Vault>>,
-    target_paths: Vec<String>,
-    profile: &BrainProfile,
-    domain_skill: Option<&str>,
-    config: &TidyConfig,
-    event_tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
-) -> Result<TidyResult> {
-    // Suppress unused warning — config is reserved for future use (e.g. max_tokens guard)
-    let _ = config;
-
-    let engine = TidyEngine::new(llm, vault, profile, domain_skill, event_tx);
-
-    let surveyed = engine.survey(&target_paths).await?;
-
-    let planned = engine
-        .plan(&surveyed.sources, &surveyed.vault_context)
-        .await?;
-
-    if planned.plan.actions.is_empty() {
-        return Ok(TidyResult {
-            plan: planned.plan,
-            session_id: None,
-            drafted_paths: Vec::new(),
-            usage: planned.usage,
-        });
-    }
-
-    let generated = engine
-        .generate(
-            &planned.plan,
-            &surveyed.sources,
-            &surveyed.vault_context,
-            planned.usage,
-        )
-        .await?;
-
-    Ok(TidyResult {
-        plan: planned.plan,
-        session_id: Some(generated.session_id),
-        drafted_paths: generated.drafted_paths,
-        usage: generated.usage,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -948,23 +1003,24 @@ mod tests {
         }]);
 
         let profile = BrainProfile::default();
-        let vault = Arc::new(Mutex::new(vault));
 
-        let engine = TidyEngine::new(&mock, vault, &profile, None, None);
+        let tidy = Tidy::new(
+            Box::new(mock),
+            Arc::new(Mutex::new(vault)),
+            profile,
+            None,
+            None,
+        )
+        .survey(&["inbox/dump.md".into()])
+        .await
+        .unwrap();
 
-        let surveyed = engine
-            .survey(&["inbox/dump.md".into()])
-            .await
-            .unwrap();
-        assert_eq!(surveyed.sources.len(), 1);
+        assert_eq!(tidy.sources().len(), 1);
 
-        let planned = engine
-            .plan(&surveyed.sources, &surveyed.vault_context)
-            .await
-            .unwrap();
-        assert_eq!(planned.plan.actions.len(), 1);
-        assert_eq!(planned.plan.output_count(), 2);
-        assert!(planned.estimated_gen.total() > 0);
+        let tidy = tidy.plan().await.unwrap();
+        assert_eq!(tidy.plan().actions.len(), 1);
+        assert_eq!(tidy.plan().output_count(), 2);
+        assert!(tidy.estimated_gen().total() > 0);
     }
 
     #[tokio::test]
@@ -1014,11 +1070,11 @@ mod tests {
         let profile = BrainProfile::default();
         let tidy_config = TidyConfig::default();
 
-        let result = run_tidy(
-            &mock,
+        let result = run_tidy_auto(
+            Box::new(mock),
             Arc::new(Mutex::new(vault)),
             vec!["inbox/note.md".into()],
-            &profile,
+            profile,
             None,
             &tidy_config,
             None,
@@ -1026,14 +1082,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.plan.output_count(), 1);
-        assert!(result.session_id.is_some());
+        assert_eq!(result.plan().output_count(), 1);
+        assert!(result.session_id().is_some());
         assert_eq!(
-            result.drafted_paths,
-            vec!["concepts/interior-mutability.md"]
+            result.drafted(),
+            &["concepts/interior-mutability.md"]
         );
-        assert_eq!(result.usage.input_tokens, 900);
-        assert_eq!(result.usage.output_tokens, 300);
+        assert_eq!(result.usage().input_tokens, 900);
+        assert_eq!(result.usage().output_tokens, 300);
     }
 
     #[tokio::test]
@@ -1068,26 +1124,28 @@ mod tests {
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let result = run_tidy(
-            &mock,
+        let result = run_tidy_auto(
+            Box::new(mock),
             Arc::new(Mutex::new(vault)),
             vec!["inbox/test.md".into()],
-            &BrainProfile::default(),
+            BrainProfile::default(),
             None,
             &TidyConfig::default(),
-            Some(&event_tx),
+            Some(event_tx),
         )
         .await
         .unwrap();
 
-        drop(event_tx);
+        assert!(result.session_id().is_some());
+
+        // Drop the result to close the event channel
+        drop(result);
 
         let mut events = Vec::new();
         while let Some(e) = event_rx.recv().await {
             events.push(e);
         }
 
-        assert!(result.session_id.is_some());
         // Should have: SurveyStart, SurveyNote, PlanStart, PlanReady,
         //              GenerateStart, GenerateNote, GenerateDone, Done
         assert!(events

@@ -1,11 +1,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use async_trait::async_trait;
 use globset::{Glob, GlobMatcher};
 use regex::Regex;
 use serde::Deserialize;
 use walkdir::WalkDir;
 
+use crate::executor::ToolExecutor;
 use crate::types::ToolDef;
 
 // ---------------------------------------------------------------------------
@@ -129,7 +131,7 @@ impl ProjectToolExecutor {
     }
 
     /// Execute a tool by name.
-    pub fn execute(&self, tool_name: &str, input: &serde_json::Value) -> Result<String, String> {
+    pub fn dispatch(&self, tool_name: &str, input: &serde_json::Value) -> Result<String, String> {
         match tool_name {
             "project_list_files" => self.exec_list_files(input),
             "project_read_file" => self.exec_read_file(input),
@@ -328,6 +330,17 @@ impl ProjectToolExecutor {
     }
 }
 
+#[async_trait]
+impl ToolExecutor for ProjectToolExecutor {
+    async fn execute(&self, name: &str, input: &serde_json::Value) -> Result<String, String> {
+        self.dispatch(name, input)
+    }
+
+    fn tool_defs(&self) -> Vec<ToolDef> {
+        ProjectToolExecutor::tool_defs()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -515,7 +528,7 @@ mod tests {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
         let result = exec
-            .execute("project_list_files", &serde_json::json!({}))
+            .dispatch("project_list_files", &serde_json::json!({}))
             .unwrap();
         let paths: Vec<String> = serde_json::from_str(&result).unwrap();
         assert!(paths.contains(&"src/main.rs".to_string()));
@@ -527,7 +540,7 @@ mod tests {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
         let result = exec
-            .execute(
+            .dispatch(
                 "project_list_files",
                 &serde_json::json!({"glob": "**/*.rs"}),
             )
@@ -542,7 +555,7 @@ mod tests {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
         let result = exec
-            .execute("project_list_files", &serde_json::json!({}))
+            .dispatch("project_list_files", &serde_json::json!({}))
             .unwrap();
         let paths: Vec<String> = serde_json::from_str(&result).unwrap();
         // Should not include node_modules or .git
@@ -557,7 +570,7 @@ mod tests {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
         let result = exec
-            .execute(
+            .dispatch(
                 "project_read_file",
                 &serde_json::json!({"path": "src/main.rs"}),
             )
@@ -573,7 +586,7 @@ mod tests {
         std::fs::write(dir.path().join("big.bin"), &big).unwrap();
 
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
-        let result = exec.execute("project_read_file", &serde_json::json!({"path": "big.bin"}));
+        let result = exec.dispatch("project_read_file", &serde_json::json!({"path": "big.bin"}));
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("too large"));
     }
@@ -586,7 +599,7 @@ mod tests {
         std::fs::write(dir.path().join("binary.dat"), &binary).unwrap();
 
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
-        let result = exec.execute(
+        let result = exec.dispatch(
             "project_read_file",
             &serde_json::json!({"path": "binary.dat"}),
         );
@@ -598,7 +611,7 @@ mod tests {
     fn read_file_path_escape() {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
-        let result = exec.execute(
+        let result = exec.dispatch(
             "project_read_file",
             &serde_json::json!({"path": "../../../etc/passwd"}),
         );
@@ -612,7 +625,7 @@ mod tests {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
         let result = exec
-            .execute("project_search", &serde_json::json!({"pattern": "fn main"}))
+            .dispatch("project_search", &serde_json::json!({"pattern": "fn main"}))
             .unwrap();
         let matches: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
         assert!(!matches.is_empty());
@@ -624,7 +637,7 @@ mod tests {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
         let result = exec
-            .execute(
+            .dispatch(
                 "project_search",
                 &serde_json::json!({"pattern": "fn", "glob": "tests/**"}),
             )
@@ -640,7 +653,7 @@ mod tests {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
         let result = exec
-            .execute(
+            .dispatch(
                 "project_search",
                 &serde_json::json!({"pattern": ".", "max_results": 2}),
             )
@@ -656,7 +669,7 @@ mod tests {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
         let result = exec
-            .execute("project_tree", &serde_json::json!({}))
+            .dispatch("project_tree", &serde_json::json!({}))
             .unwrap();
         assert!(result.contains("src/"));
         assert!(result.contains("main.rs"));
@@ -670,7 +683,7 @@ mod tests {
         let dir = setup_project();
         let exec = ProjectToolExecutor::new(dir.path()).unwrap();
         let result = exec
-            .execute("project_tree", &serde_json::json!({"depth": 1}))
+            .dispatch("project_tree", &serde_json::json!({"depth": 1}))
             .unwrap();
         // At depth 1, should show top-level dirs but not their contents
         assert!(result.contains("src/"));

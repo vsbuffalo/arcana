@@ -3,10 +3,11 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use arcana_core::{BrainProfile, SessionMeta, Vault};
 
+use crate::agent::{agent_loop, AgentConfig, AgentEvent};
 use crate::backend::LlmBackend;
 use crate::context::generate_context;
 use crate::error::{AgentError, Result};
@@ -14,7 +15,7 @@ use crate::project_tools::ProjectToolExecutor;
 use crate::prompt::build_system_prompt;
 use crate::tidy::extract_json;
 use crate::tools::VaultToolExecutor;
-use crate::types::{ContentBlock, Message, StopReason, ToolDef, Usage};
+use crate::types::{Message, Usage};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -74,35 +75,387 @@ pub struct PlannedNote {
 }
 
 // ---------------------------------------------------------------------------
-// Phase result types
+// Phase marker types
 // ---------------------------------------------------------------------------
 
-pub struct ExploreResult {
+pub struct Fresh;
+
+pub struct Explored {
     pub summary: String,
     pub usage: Usage,
 }
 
-pub struct PlanResult {
+pub struct Planned {
     pub plan: IngestPlan,
     pub usage: Usage,
     pub estimated_gen: Usage,
 }
 
-pub struct GenerateResult {
-    pub session_id: String,
-    pub drafted_paths: Vec<String>,
+pub struct Done {
+    pub plan: IngestPlan,
+    pub session_id: Option<String>,
+    pub drafted: Vec<String>,
     pub usage: Usage,
 }
 
 // ---------------------------------------------------------------------------
-// Result (for convenience wrapper)
+// Shared context (owned, no lifetimes)
 // ---------------------------------------------------------------------------
 
-pub struct IngestResult {
-    pub plan: IngestPlan,
-    pub session_id: Option<String>,
-    pub drafted_paths: Vec<String>,
-    pub usage: Usage,
+struct IngestInner {
+    llm: Box<dyn LlmBackend>,
+    project: ProjectToolExecutor,
+    project_name: String,
+    vault: Arc<Mutex<Vault>>,
+    vault_executor: VaultToolExecutor,
+    profile: BrainProfile,
+    domain_skill: Option<String>,
+    event_tx: Option<mpsc::UnboundedSender<IngestEvent>>,
+}
+
+// ---------------------------------------------------------------------------
+// Ingest pipeline (typestate)
+// ---------------------------------------------------------------------------
+
+pub struct Ingest<Phase> {
+    pub phase: Phase,
+    inner: IngestInner,
+}
+
+impl<P> Ingest<P> {
+    pub fn model_name(&self) -> &str {
+        self.inner.llm.model_name()
+    }
+
+    pub fn provider_name(&self) -> &str {
+        self.inner.llm.provider_name()
+    }
+}
+
+impl Ingest<Fresh> {
+    pub fn new(
+        llm: Box<dyn LlmBackend>,
+        project_root: &Path,
+        vault: Arc<Mutex<Vault>>,
+        profile: BrainProfile,
+        domain_skill: Option<String>,
+        event_tx: Option<mpsc::UnboundedSender<IngestEvent>>,
+    ) -> Result<Self> {
+        let project = ProjectToolExecutor::new(project_root)
+            .map_err(|e| AgentError::Config(e.to_string()))?;
+
+        let project_name = project_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project")
+            .to_string();
+
+        let vault_executor = VaultToolExecutor::new(
+            vault.clone(),
+            crate::tools::SessionContext {
+                session_id: String::new(),
+                task: "ingest-explore".into(),
+                model: llm.model_name().into(),
+                provider: llm.provider_name().into(),
+            },
+        );
+
+        Ok(Self {
+            phase: Fresh,
+            inner: IngestInner {
+                llm,
+                project,
+                project_name,
+                vault,
+                vault_executor,
+                profile,
+                domain_skill,
+                event_tx,
+            },
+        })
+    }
+
+    pub async fn explore(self, config: &IngestConfig) -> Result<Ingest<Explored>> {
+        let (summary, usage) = run_explore(
+            self.inner.llm.as_ref(),
+            &self.inner.project,
+            &self.inner.vault_executor,
+            &self.inner.profile,
+            self.inner.domain_skill.as_deref(),
+            config,
+            self.inner.event_tx.as_ref(),
+        )
+        .await?;
+
+        Ok(Ingest {
+            phase: Explored { summary, usage },
+            inner: self.inner,
+        })
+    }
+}
+
+impl Ingest<Explored> {
+    pub fn summary(&self) -> &str {
+        &self.phase.summary
+    }
+
+    pub fn usage(&self) -> &Usage {
+        &self.phase.usage
+    }
+
+    pub async fn plan(self) -> Result<Ingest<Planned>> {
+        let vault_context = {
+            let v = self.inner.vault.lock().await;
+            if self.phase.summary.is_empty() {
+                String::new()
+            } else {
+                let query: String = self.phase.summary.chars().take(500).collect();
+                generate_context(&v, &query, 20)
+            }
+        };
+
+        let (plan, plan_usage) = run_plan(
+            self.inner.llm.as_ref(),
+            &self.phase.summary,
+            &vault_context,
+            &self.inner.profile,
+            self.inner.domain_skill.as_deref(),
+            self.inner.event_tx.as_ref(),
+        )
+        .await?;
+
+        let mut spent = self.phase.usage;
+        spent.accumulate(&plan_usage);
+        let estimated_gen = estimate_generation_usage(&plan);
+
+        Ok(Ingest {
+            phase: Planned {
+                plan,
+                usage: spent,
+                estimated_gen,
+            },
+            inner: self.inner,
+        })
+    }
+}
+
+impl Ingest<Planned> {
+    pub fn plan(&self) -> &IngestPlan {
+        &self.phase.plan
+    }
+
+    pub fn usage(&self) -> &Usage {
+        &self.phase.usage
+    }
+
+    pub fn estimated_gen(&self) -> &Usage {
+        &self.phase.estimated_gen
+    }
+
+    /// Replace the plan (Planned → Planned self-transition). Recomputes estimated cost.
+    pub fn edit_plan(mut self, new_plan: IngestPlan) -> Self {
+        self.phase.estimated_gen = estimate_generation_usage(&new_plan);
+        self.phase.plan = new_plan;
+        self
+    }
+
+    pub async fn generate(self) -> Result<Ingest<Done>> {
+        // Re-generate vault context for generate phase
+        let vault_context = {
+            let v = self.inner.vault.lock().await;
+            let query = self
+                .phase
+                .plan
+                .notes
+                .first()
+                .map(|n| n.title.clone())
+                .unwrap_or_default();
+            if query.is_empty() {
+                String::new()
+            } else {
+                generate_context(&v, &query, 20)
+            }
+        };
+
+        // Compute input hash for dedup
+        let input_hash = hash_project(&self.inner.project);
+
+        // Conflict detection
+        {
+            let v = self.inner.vault.lock().await;
+            let drafts = v.drafts();
+            let output_paths: Vec<&str> = self
+                .phase
+                .plan
+                .notes
+                .iter()
+                .map(|n| n.path.as_str())
+                .collect();
+
+            let sessions = drafts.list_sessions().map_err(AgentError::Vault)?;
+            for session in &sessions {
+                if session.pending_drafts > 0 {
+                    if let Some(ref h) = session.input_hash {
+                        if *h == input_hash {
+                            send_event(
+                                self.inner.event_tx.as_ref(),
+                                IngestEvent::Error {
+                                    message: format!(
+                                        "same project already has pending drafts in session {} ({}/{})",
+                                        session.id, session.provider, session.model
+                                    ),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            if let Ok(conflicts) = drafts.find_conflicts(&output_paths) {
+                for (sid, info, paths) in conflicts {
+                    let model = format!("{}/{}", info.provider, info.model);
+                    for path in paths {
+                        send_event(
+                            self.inner.event_tx.as_ref(),
+                            IngestEvent::Error {
+                                message: format!(
+                                    "{path} already has a pending draft from session {sid} ({model})"
+                                ),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
+        // Create session and generate
+        let (session_id, drafted_paths, gen_usage) = {
+            let v = self.inner.vault.lock().await;
+            let drafts = v.drafts();
+
+            let session_id = drafts
+                .create_session(SessionMeta {
+                    source: "ingest".to_string(),
+                    provider: self.inner.llm.provider_name().to_string(),
+                    model: self.inner.llm.model_name().to_string(),
+                    task: format!("ingest {}", self.inner.project_name),
+                    input_hash: Some(input_hash),
+                })
+                .map_err(AgentError::Vault)?;
+
+            let (drafted_paths, gen_usage) = run_generate(
+                self.inner.llm.as_ref(),
+                &self.phase.plan,
+                &self.inner.project,
+                &vault_context,
+                &self.inner.profile,
+                self.inner.domain_skill.as_deref(),
+                drafts,
+                &session_id,
+                self.inner.event_tx.as_ref(),
+            )
+            .await?;
+
+            (session_id, drafted_paths, gen_usage)
+        };
+
+        let mut total_usage = self.phase.usage;
+        total_usage.accumulate(&gen_usage);
+
+        send_event(
+            self.inner.event_tx.as_ref(),
+            IngestEvent::Done {
+                session_id: session_id.clone(),
+                usage: total_usage.clone(),
+            },
+        );
+
+        Ok(Ingest {
+            phase: Done {
+                plan: self.phase.plan,
+                session_id: Some(session_id),
+                drafted: drafted_paths,
+                usage: total_usage,
+            },
+            inner: self.inner,
+        })
+    }
+
+    /// Skip generate phase when the plan is empty.
+    fn skip_generate(self) -> Ingest<Done> {
+        Ingest {
+            phase: Done {
+                plan: self.phase.plan,
+                session_id: None,
+                drafted: Vec::new(),
+                usage: self.phase.usage,
+            },
+            inner: self.inner,
+        }
+    }
+}
+
+impl Ingest<Done> {
+    pub fn plan(&self) -> &IngestPlan {
+        &self.phase.plan
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        self.phase.session_id.as_deref()
+    }
+
+    pub fn drafted(&self) -> &[String] {
+        &self.phase.drafted
+    }
+
+    pub fn usage(&self) -> &Usage {
+        &self.phase.usage
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Convenience wrapper
+// ---------------------------------------------------------------------------
+
+/// Run the full ingest pipeline: explore → plan → generate → drafts.
+pub async fn run_ingest_auto(
+    llm: Box<dyn LlmBackend>,
+    project_root: &Path,
+    vault: Arc<Mutex<Vault>>,
+    profile: BrainProfile,
+    domain_skill: Option<String>,
+    config: &IngestConfig,
+    event_tx: Option<mpsc::UnboundedSender<IngestEvent>>,
+) -> Result<Ingest<Done>> {
+    let ingest = Ingest::new(llm, project_root, vault, profile, domain_skill, event_tx)?
+        .explore(config)
+        .await?
+        .plan()
+        .await?;
+
+    if ingest.plan().notes.is_empty() {
+        return Ok(ingest.skip_generate());
+    }
+
+    ingest.generate().await
+}
+
+// ---------------------------------------------------------------------------
+// Cost estimation helper
+// ---------------------------------------------------------------------------
+
+pub fn estimate_generation_usage(plan: &IngestPlan) -> Usage {
+    let avg_source_tokens: u64 = 4000;
+    let est_input: u64 = plan
+        .notes
+        .iter()
+        .map(|n| n.source_files.len() as u64 * avg_source_tokens * 2)
+        .sum();
+    let est_output: u64 = plan.notes.len() as u64 * 2000;
+    Usage {
+        input_tokens: est_input,
+        output_tokens: est_output,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,257 +551,6 @@ tags: [tag1, tag2]
 Body content here with [[wikilinks]] to related notes."#;
 
 // ---------------------------------------------------------------------------
-// IngestEngine
-// ---------------------------------------------------------------------------
-
-pub struct IngestEngine<'a> {
-    llm: &'a dyn LlmBackend,
-    project_executor: ProjectToolExecutor,
-    project_name: String,
-    vault: Arc<Mutex<Vault>>,
-    vault_executor: VaultToolExecutor,
-    profile: &'a BrainProfile,
-    domain_skill: Option<&'a str>,
-    event_tx: Option<&'a mpsc::UnboundedSender<IngestEvent>>,
-}
-
-impl<'a> IngestEngine<'a> {
-    pub fn new(
-        llm: &'a dyn LlmBackend,
-        project_root: &Path,
-        vault: Arc<Mutex<Vault>>,
-        profile: &'a BrainProfile,
-        domain_skill: Option<&'a str>,
-        event_tx: Option<&'a mpsc::UnboundedSender<IngestEvent>>,
-    ) -> Result<Self> {
-        let project_executor = ProjectToolExecutor::new(project_root)
-            .map_err(|e| AgentError::Config(e.to_string()))?;
-
-        let project_name = project_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("project")
-            .to_string();
-
-        let vault_executor = VaultToolExecutor::new(
-            vault.clone(),
-            crate::tools::SessionContext {
-                session_id: String::new(),
-                task: "ingest-explore".into(),
-                model: llm.model_name().into(),
-                provider: llm.provider_name().into(),
-            },
-        );
-
-        Ok(Self {
-            llm,
-            project_executor,
-            project_name,
-            vault,
-            vault_executor,
-            profile,
-            domain_skill,
-            event_tx,
-        })
-    }
-
-    pub fn model_name(&self) -> &str {
-        self.llm.model_name()
-    }
-
-    pub async fn explore(&self, config: &IngestConfig) -> Result<ExploreResult> {
-        let (summary, usage) = run_explore(
-            self.llm,
-            &self.project_executor,
-            &self.vault_executor,
-            self.profile,
-            self.domain_skill,
-            config,
-            self.event_tx,
-        )
-        .await?;
-        Ok(ExploreResult { summary, usage })
-    }
-
-    pub async fn plan(
-        &self,
-        summary: &str,
-        explore_usage: Usage,
-    ) -> Result<PlanResult> {
-        // Generate vault context for plan phase
-        let vault_context = {
-            let v = self.vault.lock().await;
-            if summary.is_empty() {
-                String::new()
-            } else {
-                let query: String = summary.chars().take(500).collect();
-                generate_context(&v, &query, 20)
-            }
-        };
-
-        let (plan, plan_usage) = run_plan(
-            self.llm,
-            summary,
-            &vault_context,
-            self.profile,
-            self.domain_skill,
-            self.event_tx,
-        )
-        .await?;
-
-        let mut spent = explore_usage;
-        spent.accumulate(&plan_usage);
-
-        let estimated_gen = estimate_generation_usage(&plan);
-
-        Ok(PlanResult {
-            plan,
-            usage: spent,
-            estimated_gen,
-        })
-    }
-
-    pub async fn generate(
-        &self,
-        plan: &IngestPlan,
-        plan_usage: Usage,
-    ) -> Result<GenerateResult> {
-        // Re-generate vault context for generate phase
-        let vault_context = {
-            let v = self.vault.lock().await;
-            // Use first note title as rough search query
-            let query = plan
-                .notes
-                .first()
-                .map(|n| n.title.clone())
-                .unwrap_or_default();
-            if query.is_empty() {
-                String::new()
-            } else {
-                generate_context(&v, &query, 20)
-            }
-        };
-
-        // Compute input hash for dedup
-        let input_hash = hash_project(&self.project_executor);
-
-        // Conflict detection
-        {
-            let v = self.vault.lock().await;
-            let drafts = v.drafts();
-            let output_paths: Vec<&str> =
-                plan.notes.iter().map(|n| n.path.as_str()).collect();
-
-            let sessions = drafts.list_sessions().map_err(AgentError::Vault)?;
-            for session in &sessions {
-                if session.pending_drafts > 0 {
-                    if let Some(ref h) = session.input_hash {
-                        if *h == input_hash {
-                            send_event(
-                                self.event_tx,
-                                IngestEvent::Error {
-                                    message: format!(
-                                        "same project already has pending drafts in session {} ({}/{})",
-                                        session.id, session.provider, session.model
-                                    ),
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-
-            if let Ok(conflicts) = drafts.find_conflicts(&output_paths) {
-                for (sid, info, paths) in conflicts {
-                    let model = format!("{}/{}", info.provider, info.model);
-                    for path in paths {
-                        send_event(
-                            self.event_tx,
-                            IngestEvent::Error {
-                                message: format!(
-                                    "{path} already has a pending draft from session {sid} ({model})"
-                                ),
-                            },
-                        );
-                    }
-                }
-            }
-        }
-
-        // Create session and generate
-
-        let (session_id, drafted_paths, gen_usage) = {
-            let v = self.vault.lock().await;
-            let drafts = v.drafts();
-
-            let session_id = drafts
-                .create_session(SessionMeta {
-                    source: "ingest".to_string(),
-                    provider: self.llm.provider_name().to_string(),
-                    model: self.llm.model_name().to_string(),
-                    task: format!("ingest {}", self.project_name),
-                    input_hash: Some(input_hash),
-                })
-                .map_err(AgentError::Vault)?;
-
-            let (drafted_paths, gen_usage) = run_generate(
-                self.llm,
-                plan,
-                &self.project_executor,
-                &vault_context,
-                self.profile,
-                self.domain_skill,
-                drafts,
-                &session_id,
-                self.event_tx,
-            )
-            .await?;
-
-            (session_id, drafted_paths, gen_usage)
-        };
-
-        let mut total_usage = plan_usage;
-        total_usage.accumulate(&gen_usage);
-
-        send_event(
-            self.event_tx,
-            IngestEvent::Done {
-                session_id: session_id.clone(),
-                usage: total_usage.clone(),
-            },
-        );
-
-        Ok(GenerateResult {
-            session_id,
-            drafted_paths,
-            usage: total_usage,
-        })
-    }
-
-    pub fn estimate_generation(&self, plan: &IngestPlan) -> Usage {
-        estimate_generation_usage(plan)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Cost estimation helper
-// ---------------------------------------------------------------------------
-
-pub fn estimate_generation_usage(plan: &IngestPlan) -> Usage {
-    let avg_source_tokens: u64 = 4000;
-    let est_input: u64 = plan
-        .notes
-        .iter()
-        .map(|n| n.source_files.len() as u64 * avg_source_tokens * 2)
-        .sum();
-    let est_output: u64 = plan.notes.len() as u64 * 2000;
-    Usage {
-        input_tokens: est_input,
-        output_tokens: est_output,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Phase 1: Explore (private)
 // ---------------------------------------------------------------------------
 
@@ -463,10 +565,6 @@ async fn run_explore(
 ) -> Result<(String, Usage)> {
     send_event(event_tx, IngestEvent::ExploreStart);
 
-    // Combined tool defs
-    let mut tools: Vec<ToolDef> = ProjectToolExecutor::tool_defs();
-    tools.extend(VaultToolExecutor::read_only_tool_defs());
-
     let system = build_system_prompt(
         profile.taxonomy(),
         profile.style(),
@@ -475,148 +573,102 @@ async fn run_explore(
         None,
     );
 
-    let mut messages = vec![Message::user(
-        "Explore this project and summarize your findings.",
-    )];
-    let mut total_usage = Usage::default();
+    let agent_config = AgentConfig {
+        max_iterations: config.max_explore_iterations,
+        max_tokens: config.max_tokens / 2, // explore gets half the budget
+    };
 
-    for iteration in 0..config.max_explore_iterations {
-        send_event(
-            event_tx,
-            IngestEvent::ExploreIteration { iteration },
-        );
+    // Composite executor: project tools + read-only vault tools
+    let explore_executor = ExploreExecutor {
+        project: project_executor,
+        vault: vault_executor,
+    };
 
-        let response = llm.chat(&system, &messages, &tools).await?;
-        total_usage.accumulate(&response.usage);
-
-        let text = response.text();
-
-        // Check for <summary> in text output
-        if let Some(summary) = extract_summary(&text) {
-            send_event(
-                event_tx,
-                IngestEvent::ExploreDone {
-                    iterations: iteration + 1,
-                },
-            );
-            info!(
-                "exploration done after {} iterations ({} tokens)",
-                iteration + 1,
-                total_usage.total()
-            );
-            return Ok((summary.to_string(), total_usage));
-        }
-
-        // Token budget check
-        if total_usage.total() >= config.max_tokens / 2 {
-            warn!(
-                "exploration using 50%+ of token budget ({}/{}), stopping",
-                total_usage.total(),
-                config.max_tokens
-            );
-            // Force a summary by returning what we have
-            if !text.is_empty() {
-                send_event(
-                    event_tx,
-                    IngestEvent::ExploreDone {
-                        iterations: iteration + 1,
-                    },
-                );
-                return Ok((text, total_usage));
-            }
-        }
-
-        // Check stop reason — if no tool calls, we're done
-        if response.stop_reason == StopReason::EndTurn
-            || response.stop_reason == StopReason::MaxTokens
-        {
-            send_event(
-                event_tx,
-                IngestEvent::ExploreDone {
-                    iterations: iteration + 1,
-                },
-            );
-            return Ok((text, total_usage));
-        }
-
-        // Handle tool calls
-        let tool_calls: Vec<_> = response
-            .content
-            .iter()
-            .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
-            .cloned()
-            .collect();
-
-        if tool_calls.is_empty() {
-            send_event(
-                event_tx,
-                IngestEvent::ExploreDone {
-                    iterations: iteration + 1,
-                },
-            );
-            return Ok((text, total_usage));
-        }
-
-        messages.push(Message::assistant(response.content));
-
-        let mut results = Vec::new();
-        for call in &tool_calls {
-            if let ContentBlock::ToolUse { id, name, input } = call {
-                send_event(
-                    event_tx,
-                    IngestEvent::ExploreToolCall { name: name.clone() },
-                );
-
-                let result = dispatch_tool(name, input, project_executor, vault_executor).await;
-
-                match result {
-                    Ok(output) => {
-                        debug!("tool {name} ok: {}...", &output[..output.len().min(100)]);
-                        results.push(ContentBlock::ToolResult {
-                            tool_use_id: id.clone(),
-                            content: output,
-                            is_error: false,
-                        });
+    // Bridge AgentEvents → IngestEvents
+    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let ingest_tx = event_tx.cloned();
+    let bridge = tokio::spawn(async move {
+        while let Some(ev) = agent_rx.recv().await {
+            if let Some(ref tx) = ingest_tx {
+                match ev {
+                    AgentEvent::IterationStart { iteration } => {
+                        let _ = tx.send(IngestEvent::ExploreIteration { iteration });
                     }
-                    Err(err) => {
-                        debug!("tool {name} error: {err}");
-                        results.push(ContentBlock::ToolResult {
-                            tool_use_id: id.clone(),
-                            content: err,
-                            is_error: true,
-                        });
+                    AgentEvent::ToolStart { name } => {
+                        let _ = tx.send(IngestEvent::ExploreToolCall { name });
                     }
+                    _ => {}
                 }
             }
         }
+    });
 
-        messages.push(Message::tool_results(results));
-    }
+    let mut messages = vec![Message::user(
+        "Explore this project and summarize your findings.",
+    )];
 
-    // Exhausted iterations
-    warn!(
-        "exploration hit max iterations ({})",
-        config.max_explore_iterations
+    let result = agent_loop(
+        llm,
+        &system,
+        &mut messages,
+        &explore_executor,
+        &agent_config,
+        Some(&agent_tx),
+    )
+    .await;
+
+    drop(agent_tx);
+    let _ = bridge.await;
+
+    let (text, usage) = result?;
+
+    // Extract <summary> tags if present, otherwise use raw text
+    let summary = extract_summary(&text)
+        .map(|s| s.to_string())
+        .unwrap_or(text);
+
+    send_event(
+        event_tx,
+        IngestEvent::ExploreDone {
+            iterations: messages.len() / 2, // approximate
+        },
     );
-    Err(AgentError::Llm(format!(
-        "exploration exceeded max iterations ({})",
-        config.max_explore_iterations
-    )))
+
+    info!("exploration done ({} tokens)", usage.total());
+
+    Ok((summary, usage))
 }
 
-/// Dispatch a tool call to the appropriate executor by name prefix.
-async fn dispatch_tool(
-    name: &str,
-    input: &serde_json::Value,
-    project_executor: &ProjectToolExecutor,
-    vault_executor: &VaultToolExecutor,
-) -> std::result::Result<String, String> {
-    if name.starts_with("project_") {
-        project_executor.execute(name, input)
-    } else if name.starts_with("vault_") {
-        vault_executor.execute(name, input).await
-    } else {
-        Err(format!("unknown tool: {name}"))
+// ---------------------------------------------------------------------------
+// ExploreExecutor: combines project + read-only vault tools for exploration
+// ---------------------------------------------------------------------------
+
+/// Composite executor for the explore phase. Dispatches by tool name prefix.
+struct ExploreExecutor<'a> {
+    project: &'a ProjectToolExecutor,
+    vault: &'a VaultToolExecutor,
+}
+
+#[async_trait::async_trait]
+impl crate::executor::ToolExecutor for ExploreExecutor<'_> {
+    async fn execute(
+        &self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> std::result::Result<String, String> {
+        if name.starts_with("project_") {
+            self.project.dispatch(name, input)
+        } else if name.starts_with("vault_") {
+            self.vault.dispatch(name, input).await
+        } else {
+            Err(format!("unknown tool: {name}"))
+        }
+    }
+
+    fn tool_defs(&self) -> Vec<crate::types::ToolDef> {
+        let mut defs = ProjectToolExecutor::tool_defs();
+        defs.extend(VaultToolExecutor::read_only_tool_defs());
+        defs
     }
 }
 
@@ -719,7 +771,7 @@ async fn run_generate(
         // Re-read source files for this note
         let mut source_material = String::new();
         for src_path in &note.source_files {
-            let content = project_executor.execute(
+            let content = project_executor.dispatch(
                 "project_read_file",
                 &serde_json::json!({"path": src_path}),
             );
@@ -826,65 +878,12 @@ fn hash_project(project_executor: &ProjectToolExecutor) -> String {
     use std::hash::{Hash, Hasher};
 
     let tree = project_executor
-        .execute("project_tree", &serde_json::json!({"depth": 4}))
+        .dispatch("project_tree", &serde_json::json!({"depth": 4}))
         .unwrap_or_default();
 
     let mut hasher = DefaultHasher::new();
     tree.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
-}
-
-// ---------------------------------------------------------------------------
-// Convenience wrapper
-// ---------------------------------------------------------------------------
-
-/// Run the full ingest pipeline: explore → plan → generate → drafts.
-///
-/// Thin wrapper over `IngestEngine` — calls all three phases and returns
-/// the combined result. Used by tests and `--auto` mode.
-pub async fn run_ingest(
-    llm: &dyn LlmBackend,
-    project_root: &Path,
-    vault: Arc<Mutex<Vault>>,
-    profile: &BrainProfile,
-    domain_skill: Option<&str>,
-    config: &IngestConfig,
-    event_tx: Option<&mpsc::UnboundedSender<IngestEvent>>,
-) -> Result<IngestResult> {
-    let engine = IngestEngine::new(
-        llm,
-        project_root,
-        vault,
-        profile,
-        domain_skill,
-        event_tx,
-    )?;
-
-    let explored = engine.explore(config).await?;
-
-    let planned = engine
-        .plan(&explored.summary, explored.usage)
-        .await?;
-
-    if planned.plan.notes.is_empty() {
-        return Ok(IngestResult {
-            plan: planned.plan,
-            session_id: None,
-            drafted_paths: Vec::new(),
-            usage: planned.usage,
-        });
-    }
-
-    let generated = engine
-        .generate(&planned.plan, planned.usage)
-        .await?;
-
-    Ok(IngestResult {
-        plan: planned.plan,
-        session_id: Some(generated.session_id),
-        drafted_paths: generated.drafted_paths,
-        usage: generated.usage,
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -905,7 +904,7 @@ fn send_event(tx: Option<&mpsc::UnboundedSender<IngestEvent>>, event: IngestEven
 mod tests {
     use super::*;
     use crate::backend::mock::MockBackend;
-    use crate::types::{LlmResponse, StopReason, Usage};
+    use crate::types::{ContentBlock, LlmResponse, StopReason, Usage};
 
     #[test]
     fn extract_summary_basic() {
@@ -970,51 +969,50 @@ mod tests {
 
         let plan_json = r#"{"notes":[{"path":"concepts/hello-world.md","title":"Hello World","summary":"A simple hello world program","source_files":["src/main.rs"]}]}"#;
 
-        // Explore response: end turn with summary (no tool use)
-        let explore_response = LlmResponse {
-            content: vec![ContentBlock::Text {
-                text: "<summary>\nThis is a simple hello world project.\n</summary>".into(),
-            }],
-            stop_reason: StopReason::EndTurn,
-            usage: Usage {
-                input_tokens: 500,
-                output_tokens: 100,
+        let mock = MockBackend::new(vec![
+            // Explore response
+            LlmResponse {
+                content: vec![ContentBlock::Text {
+                    text: "<summary>\nThis is a simple hello world project.\n</summary>".into(),
+                }],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 500,
+                    output_tokens: 100,
+                },
             },
-        };
-
-        // Plan response
-        let plan_response = LlmResponse {
-            content: vec![ContentBlock::Text {
-                text: plan_json.into(),
-            }],
-            stop_reason: StopReason::EndTurn,
-            usage: Usage {
-                input_tokens: 300,
-                output_tokens: 80,
+            // Plan response
+            LlmResponse {
+                content: vec![ContentBlock::Text {
+                    text: plan_json.into(),
+                }],
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 300,
+                    output_tokens: 80,
+                },
             },
-        };
+        ]);
 
-        let mock = MockBackend::new(vec![explore_response, plan_response]);
         let profile = BrainProfile::default();
-        let vault = Arc::new(Mutex::new(vault));
 
-        let engine = IngestEngine::new(
-            &mock,
+        let ingest = Ingest::new(
+            Box::new(mock),
             project_dir.path(),
-            vault,
-            &profile,
+            Arc::new(Mutex::new(vault)),
+            profile,
             None,
             None,
         )
         .unwrap();
 
-        let explored = engine.explore(&IngestConfig::default()).await.unwrap();
-        assert!(explored.summary.contains("hello world"));
+        let ingest = ingest.explore(&IngestConfig::default()).await.unwrap();
+        assert!(ingest.summary().contains("hello world"));
 
-        let planned = engine.plan(&explored.summary, explored.usage).await.unwrap();
-        assert_eq!(planned.plan.notes.len(), 1);
-        assert_eq!(planned.plan.notes[0].path, "concepts/hello-world.md");
-        assert!(planned.estimated_gen.total() > 0);
+        let ingest = ingest.plan().await.unwrap();
+        assert_eq!(ingest.plan().notes.len(), 1);
+        assert_eq!(ingest.plan().notes[0].path, "concepts/hello-world.md");
+        assert!(ingest.estimated_gen().total() > 0);
     }
 
     #[tokio::test]
@@ -1075,11 +1073,11 @@ mod tests {
 
         let profile = BrainProfile::default();
 
-        let result = run_ingest(
-            &mock,
+        let result = run_ingest_auto(
+            Box::new(mock),
             project_dir.path(),
             Arc::new(Mutex::new(vault)),
-            &profile,
+            profile,
             None,
             &IngestConfig::default(),
             None,
@@ -1087,11 +1085,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.plan.notes.len(), 1);
-        assert!(result.session_id.is_some());
-        assert_eq!(result.drafted_paths, vec!["concepts/hello.md"]);
-        assert_eq!(result.usage.input_tokens, 1200);
-        assert_eq!(result.usage.output_tokens, 380);
+        assert_eq!(result.plan().notes.len(), 1);
+        assert!(result.session_id().is_some());
+        assert_eq!(result.drafted(), &["concepts/hello.md"]);
+        assert_eq!(result.usage().input_tokens, 1200);
+        assert_eq!(result.usage().output_tokens, 380);
     }
 
     #[tokio::test]
@@ -1149,11 +1147,11 @@ mod tests {
             },
         ]);
 
-        let result = run_ingest(
-            &mock,
+        let result = run_ingest_auto(
+            Box::new(mock),
             project_dir.path(),
             Arc::new(Mutex::new(vault)),
-            &BrainProfile::default(),
+            BrainProfile::default(),
             None,
             &IngestConfig::default(),
             None,
@@ -1161,7 +1159,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(result.plan.notes.is_empty());
+        assert!(result.plan().notes.is_empty());
     }
 
     #[tokio::test]
@@ -1202,26 +1200,28 @@ mod tests {
 
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
-        let result = run_ingest(
-            &mock,
+        let result = run_ingest_auto(
+            Box::new(mock),
             project_dir.path(),
             Arc::new(Mutex::new(vault)),
-            &BrainProfile::default(),
+            BrainProfile::default(),
             None,
             &IngestConfig::default(),
-            Some(&event_tx),
+            Some(event_tx),
         )
         .await
         .unwrap();
 
-        drop(event_tx);
+        assert!(result.session_id().is_some());
+
+        // Drop the result to close the event channel
+        drop(result);
 
         let mut events = Vec::new();
         while let Some(e) = event_rx.recv().await {
             events.push(e);
         }
 
-        assert!(result.session_id.is_some());
         assert!(events
             .iter()
             .any(|e| matches!(e, IngestEvent::ExploreStart)));

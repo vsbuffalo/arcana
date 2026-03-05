@@ -3,8 +3,8 @@ use tracing::{debug, info, warn};
 
 use crate::backend::LlmBackend;
 use crate::error::{AgentError, Result};
-use crate::tools::VaultToolExecutor;
-use crate::types::{ContentBlock, Message, StopReason, ToolDef, Usage};
+use crate::executor::ToolExecutor;
+use crate::types::{ContentBlock, Message, StopReason, Usage};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -47,20 +47,19 @@ pub enum AgentEvent {
 pub async fn agent_loop(
     llm: &dyn LlmBackend,
     system_prompt: &str,
-    initial_message: &str,
-    tools: &[ToolDef],
-    executor: &VaultToolExecutor,
+    messages: &mut Vec<Message>,
+    executor: &dyn ToolExecutor,
     config: &AgentConfig,
     event_tx: Option<&mpsc::UnboundedSender<AgentEvent>>,
 ) -> Result<(String, Usage)> {
-    let mut messages = vec![Message::user(initial_message)];
+    let tools = executor.tool_defs();
     let mut total_usage = Usage::default();
     let mut warned_50pct = false;
 
     for iteration in 0..config.max_iterations {
         send_event(event_tx, AgentEvent::IterationStart { iteration });
 
-        let response = llm.chat(system_prompt, &messages, tools).await?;
+        let response = llm.chat(system_prompt, messages, &tools).await?;
         total_usage.accumulate(&response.usage);
 
         // Log any text output
@@ -222,14 +221,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("note.md"), "hello").unwrap();
         let executor = test_executor(dir.path());
-        let tools = VaultToolExecutor::tool_defs();
         let mock = MockBackend::single_text("I found the answer.");
 
+        let mut messages = vec![Message::user("search for rust")];
         let (text, usage) = agent_loop(
             &mock,
             "you are helpful",
-            "search for rust",
-            &tools,
+            &mut messages,
             &executor,
             &AgentConfig::default(),
             None,
@@ -246,7 +244,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("note.md"), "hello world").unwrap();
         let executor = test_executor(dir.path());
-        let tools = VaultToolExecutor::tool_defs();
 
         let mock = MockBackend::new(vec![
             // First response: call vault_search
@@ -281,11 +278,11 @@ mod tests {
         ]);
 
         let (rx_tx, mut rx) = mpsc::unbounded_channel();
+        let mut messages = vec![Message::user("search for hello")];
         let (text, usage) = agent_loop(
             &mock,
             "you are helpful",
-            "search for hello",
-            &tools,
+            &mut messages,
             &executor,
             &AgentConfig::default(),
             Some(&rx_tx),
@@ -317,7 +314,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("note.md"), "hello").unwrap();
         let executor = test_executor(dir.path());
-        let tools = VaultToolExecutor::tool_defs();
 
         // Response uses more tokens than budget
         let mock = MockBackend::new(vec![LlmResponse {
@@ -343,7 +339,8 @@ mod tests {
             max_tokens: 100, // Very small budget
         };
 
-        let (text, usage) = agent_loop(&mock, "", "search", &tools, &executor, &config, None)
+        let mut messages = vec![Message::user("search")];
+        let (text, usage) = agent_loop(&mock, "", &mut messages, &executor, &config, None)
             .await
             .unwrap();
 

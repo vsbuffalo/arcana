@@ -106,7 +106,7 @@ pub struct Cli {
     config: Option<PathBuf>,
 
     /// Log level (trace, debug, info, warn, error)
-    #[arg(long, global = true, default_value = "warn")]
+    #[arg(long, global = true, default_value = "error")]
     log_level: String,
 
     /// Output as JSON

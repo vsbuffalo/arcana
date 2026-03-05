@@ -3,6 +3,7 @@ pub mod backend;
 pub mod chat;
 pub mod context;
 pub mod error;
+pub mod executor;
 pub mod ingest;
 pub mod permissions;
 pub mod pricing;
@@ -17,17 +18,17 @@ pub use backend::LlmBackend;
 pub use chat::{ChatResponse, ChatSession};
 pub use context::generate_context;
 pub use error::AgentError;
+pub use executor::{CompositeExecutor, PermissionedExecutor, ToolExecutor};
 pub use permissions::{ApprovalResult, ToolPermission};
 pub use project_tools::ProjectToolExecutor;
 pub use prompt::build_system_prompt;
 pub use ingest::{
-    run_ingest, ExploreResult, GenerateResult, IngestConfig, IngestEngine, IngestEvent,
-    IngestPlan, IngestResult, PlanResult,
+    run_ingest_auto, Done as IngestDone, Explored as IngestExplored, Fresh as IngestFresh,
+    Ingest, IngestConfig, IngestEvent, IngestPlan, Planned as IngestPlanned,
 };
 pub use pricing::CostEstimate;
 pub use tidy::{
-    run_tidy, SourceNote, SurveyResult, TidyConfig, TidyEngine, TidyEvent, TidyGenerateResult,
-    TidyPlan, TidyPlanResult, TidyResult,
+    run_tidy_auto, SourceNote, Tidy, TidyConfig, TidyDone, TidyEvent, TidyPlan, TidyPlanned,
 };
 pub use tools::{SessionContext, VaultToolExecutor};
 pub use types::{ContentBlock, LlmResponse, Message, StopReason, ToolDef, Usage};

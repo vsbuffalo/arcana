@@ -205,7 +205,7 @@ impl Default for AgentSettings {
     fn default() -> Self {
         Self {
             max_iterations: 20,
-            max_tokens: 200_000,
+            max_tokens: 1_000_000,
             max_output_tokens: 8192,
             default_tags: vec!["ai-generated".to_string()],
             ingest: OperationOverrides::default(),
@@ -220,6 +220,7 @@ impl Default for AgentSettings {
 pub struct OperationOverrides {
     pub max_iterations: Option<usize>,
     pub max_tokens: Option<usize>,
+    pub max_explore_iterations: Option<usize>,
     pub profile: Option<String>,
 }
 
@@ -409,7 +410,7 @@ mod tests {
         let config = ArcanaConfig::default();
         assert!(matches!(config.index.db_location, DbLocation::Colocated));
         assert_eq!(config.search.default_limit, 20);
-        assert_eq!(config.agent.max_tokens, 200_000);
+        assert_eq!(config.agent.max_tokens, 1_000_000);
         assert_eq!(config.agent.max_output_tokens, 8192);
         assert_eq!(config.default_profile, "default");
         // Zero config works — resolve_llm falls back to compiled defaults
@@ -484,7 +485,7 @@ mod tests {
     #[test]
     fn load_merged_no_files() {
         let config = load_merged(None, None).unwrap();
-        assert_eq!(config.agent.max_tokens, 200_000);
+        assert_eq!(config.agent.max_tokens, 1_000_000);
         let llm = config.resolve_llm(None, None, None, None).unwrap();
         assert_eq!(llm.provider, "anthropic");
     }
@@ -514,7 +515,7 @@ mod tests {
         assert_eq!(llm.model, "claude-sonnet-4-5-20250929");
         let llm = config.resolve_llm(Some("haiku"), None, None, None).unwrap();
         assert_eq!(llm.model, "claude-haiku-4-5-20251001");
-        assert_eq!(config.agent.max_tokens, 200_000);
+        assert_eq!(config.agent.max_tokens, 1_000_000);
     }
 
     #[test]
@@ -584,7 +585,7 @@ mod tests {
             .ingest
             .max_tokens
             .unwrap_or(config.agent.max_tokens);
-        assert_eq!(ingest_max, 200_000);
+        assert_eq!(ingest_max, 1_000_000);
 
         let ingest_iters = config
             .agent
