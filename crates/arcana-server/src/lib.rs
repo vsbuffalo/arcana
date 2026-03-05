@@ -1,6 +1,9 @@
+pub mod oauth;
+
 use std::sync::Arc;
 
 use arcana_core::{Frontmatter, SearchFilters, SearchQuery, SessionMeta, Vault, VaultStats};
+pub use oauth::OAuthConfig;
 use rmcp::{
     handler::server::tool::ToolRouter,
     handler::server::wrapper::Parameters,
@@ -547,7 +550,12 @@ pub async fn serve_stdio(vault: Vault) -> anyhow::Result<()> {
 }
 
 /// Serve the MCP server over HTTP with streamable SSE (for Claude Web / remote clients).
-pub async fn serve_sse(vault: Vault, port: u16) -> anyhow::Result<()> {
+pub async fn serve_sse(
+    vault: Vault,
+    port: u16,
+    bearer_token: Option<String>,
+    oauth_config: Option<OAuthConfig>,
+) -> anyhow::Result<()> {
     let tree = vault.vault_tree().unwrap_or_default();
     let instructions = build_mcp_instructions(vault.profile(), &tree);
     let vault = Arc::new(tokio::sync::Mutex::new(vault));
@@ -568,13 +576,64 @@ pub async fn serve_sse(vault: Vault, port: u16) -> anyhow::Result<()> {
         config,
     );
 
-    let app = axum::Router::new().route(
+    let mcp_route = axum::Router::new().route(
         "/mcp",
         axum::routing::any(move |req: axum::extract::Request| {
             let svc = service.clone();
             async move { svc.handle(req).await }
         }),
     );
+
+    let app = if let Some(oauth) = oauth_config {
+        info!("OAuth 2.1 auth enabled for SSE transport");
+        let oauth_state = oauth::OAuthState::new(oauth, bearer_token);
+
+        let mcp_route = mcp_route.layer(axum::middleware::from_fn_with_state(
+            oauth_state.clone(),
+            oauth::bearer_auth,
+        ));
+
+        let oauth_routes = axum::Router::new()
+            .route(
+                "/.well-known/oauth-authorization-server",
+                axum::routing::get(oauth::metadata),
+            )
+            .route(
+                "/.well-known/oauth-protected-resource",
+                axum::routing::get(oauth::protected_resource),
+            )
+            // Claude.ai may append the MCP path to the protected resource URL
+            .route(
+                "/.well-known/oauth-protected-resource/mcp",
+                axum::routing::get(oauth::protected_resource),
+            )
+            .route(
+                "/authorize",
+                axum::routing::get(oauth::authorize_form).post(oauth::authorize_submit),
+            )
+            .route("/token", axum::routing::post(oauth::token))
+            .with_state(oauth_state);
+
+        mcp_route.merge(oauth_routes)
+    } else if let Some(token) = bearer_token {
+        info!("static bearer token auth enabled for SSE transport");
+        let oauth_state =
+            oauth::OAuthState::new(
+                OAuthConfig {
+                    client_id: String::new(),
+                    client_secret: String::new(),
+                    password: String::new(),
+                },
+                Some(token),
+            );
+        mcp_route.layer(axum::middleware::from_fn_with_state(
+            oauth_state,
+            oauth::bearer_auth,
+        ))
+    } else {
+        tracing::warn!("no auth configured — SSE transport is unauthenticated");
+        mcp_route
+    };
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     info!("arcana MCP server listening on http://0.0.0.0:{port}/mcp");

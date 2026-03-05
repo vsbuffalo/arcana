@@ -17,6 +17,24 @@ pub struct ServeArgs {
     /// Port for the SSE transport (ignored for stdio)
     #[arg(short, long, default_value = "8080")]
     pub port: u16,
+
+    /// Static bearer token for SSE auth (also reads ARCANA_BEARER_TOKEN).
+    /// Accepted alongside OAuth tokens when OAuth is configured.
+    #[arg(long, env = "ARCANA_BEARER_TOKEN")]
+    pub bearer_token: Option<String>,
+
+    /// OAuth client ID (also reads ARCANA_OAUTH_CLIENT_ID).
+    /// Setting this enables OAuth 2.1 auth for the SSE transport.
+    #[arg(long, env = "ARCANA_OAUTH_CLIENT_ID")]
+    pub oauth_client_id: Option<String>,
+
+    /// OAuth client secret (also reads ARCANA_OAUTH_CLIENT_SECRET).
+    #[arg(long, env = "ARCANA_OAUTH_CLIENT_SECRET")]
+    pub oauth_client_secret: Option<String>,
+
+    /// Password for the OAuth authorization page (also reads ARCANA_OAUTH_PASSWORD).
+    #[arg(long, env = "ARCANA_OAUTH_PASSWORD")]
+    pub oauth_password: Option<String>,
 }
 
 pub fn run_serve(args: ServeArgs, config: ArcanaConfig) -> Result<()> {
@@ -25,11 +43,33 @@ pub fn run_serve(args: ServeArgs, config: ArcanaConfig) -> Result<()> {
     // Index on startup so the vault is always fresh
     vault.index()?;
 
+    let oauth_config = match (
+        &args.oauth_client_id,
+        &args.oauth_client_secret,
+        &args.oauth_password,
+    ) {
+        (Some(id), Some(secret), Some(password)) => {
+            Some(arcana_server::OAuthConfig {
+                client_id: id.clone(),
+                client_secret: secret.clone(),
+                password: password.clone(),
+            })
+        }
+        (None, None, None) => None,
+        _ => {
+            anyhow::bail!(
+                "OAuth requires all three: --oauth-client-id, --oauth-client-secret, and --oauth-password"
+            );
+        }
+    };
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         match args.transport {
             Transport::Stdio => arcana_server::serve_stdio(vault).await,
-            Transport::Sse => arcana_server::serve_sse(vault, args.port).await,
+            Transport::Sse => {
+                arcana_server::serve_sse(vault, args.port, args.bearer_token, oauth_config).await
+            }
         }
     })
 }
