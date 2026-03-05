@@ -124,9 +124,14 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
         let vault_arc = Arc::new(Mutex::new(vault));
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let budget_exhausted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let budget_exhausted_flag = budget_exhausted.clone();
 
         let event_handle = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
+                if matches!(event, IngestEvent::ExploreBudgetExhausted { .. }) {
+                    budget_exhausted_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 handle_event(&event);
             }
         });
@@ -158,11 +163,18 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
             }
         };
 
-        // Let the event handler flush "done" before we print anything else
-        tokio::task::yield_now().await;
+        // Print plan completion synchronously (don't rely on async event handler)
+        eprintln!("{}", "done".green());
 
         if ingest.plan().notes.is_empty() {
-            eprintln!("  {} nothing to ingest", "→".dimmed());
+            if budget_exhausted.load(std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "  {} nothing to ingest (explore hit token budget — try increasing agent.max_tokens or agent.ingest.max_tokens)",
+                    "→".yellow()
+                );
+            } else {
+                eprintln!("  {} nothing to ingest", "→".dimmed());
+            }
             return Ok(());
         }
 
@@ -262,55 +274,108 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
     })
 }
 
+const CLEAR: &str = "\x1b[2K";
+const UP: &str = "\x1b[A";
+
 fn handle_event(event: &IngestEvent) {
     match event {
-        IngestEvent::ExploreStart => {
-            eprint!("  {} exploring project... ", "→".dimmed());
+        // -- Explore: single-line progress, rewrites in place --
+        IngestEvent::ExploreStart { .. } => {
+            eprint!("  {} exploring...", "→".dimmed());
+            std::io::stderr().flush().ok();
         }
-        IngestEvent::ExploreIteration { iteration } => {
-            if *iteration > 0 && iteration % 5 == 0 {
-                eprint!("{}", format!("[{iteration}] ").dimmed());
-            }
+        IngestEvent::ExploreIteration {
+            iteration,
+            max_iterations,
+            tool_count,
+            tokens_used,
+        } => {
+            eprint!(
+                "{CLEAR}\r  {} exploring [{}/{}]  {} tools, {}K tokens",
+                "→".dimmed(),
+                iteration + 1,
+                max_iterations,
+                tool_count,
+                tokens_used / 1000,
+            );
+            std::io::stderr().flush().ok();
         }
-        IngestEvent::ExploreToolCall { ref name } => {
-            eprint!("{}", format!("{name} ").dimmed());
+        IngestEvent::ExploreToolCall {
+            ref description, ..
+        } => {
+            // Append tool description after the status on same line
+            eprint!("  {}", description.dimmed());
+            std::io::stderr().flush().ok();
         }
-        IngestEvent::ExploreDone { iterations } => {
+        IngestEvent::ExploreBudgetExhausted { used, budget } => {
             eprintln!(
-                "{}",
-                format!(
-                    "done ({iterations} iteration{})",
-                    if *iterations == 1 { "" } else { "s" }
-                )
-                .green()
+                "{CLEAR}\r  {} explore token budget exhausted ({}K/{}K)",
+                "!".yellow().bold(),
+                used / 1000,
+                budget / 1000,
             );
         }
+        IngestEvent::ExploreDone {
+            iterations,
+            tokens_used,
+            ..
+        } => {
+            eprintln!(
+                "{CLEAR}\r  {} explored {iterations} iterations, {}K tokens  {}",
+                "→".dimmed(),
+                tokens_used / 1000,
+                "done".green()
+            );
+        }
+
+        // -- Plan: single-line spinner --
         IngestEvent::PlanStart => {
-            eprint!("  {} generating plan... ", "→".dimmed());
+            eprint!("  {} planning... ", "→".dimmed());
+            std::io::stderr().flush().ok();
         }
         IngestEvent::PlanReady { .. } => {
-            eprintln!("{}", "done".green());
+            // "done" printed synchronously in main flow to avoid race
         }
-        IngestEvent::GenerateStart { total } => {
+
+        // -- Generate: two-line progress block --
+        IngestEvent::GenerateStart { .. } => {
+            // Set up two-line block (blank status + blank detail)
+            // Extra blank line for spacing after plan output
             eprintln!();
-            eprintln!(
-                "  {} generating {} note{}...",
+            eprintln!();
+            eprintln!();
+        }
+        IngestEvent::GenerateNote {
+            index,
+            total,
+            ref path,
+            tokens_used,
+        } => {
+            // Rewrite both lines
+            let status = format!(
+                "  {} generating [{}/{}]  {}K tokens",
                 "→".dimmed(),
+                index + 1,
                 total,
-                if *total == 1 { "" } else { "s" }
+                tokens_used / 1000,
             );
+            eprint!("{UP}{UP}{CLEAR}\r{status}\n{CLEAR}\r    writing {}\n", path.cyan());
+            std::io::stderr().flush().ok();
         }
-        IngestEvent::GenerateNote { index, ref path } => {
-            let label = format!("    [{}] {}... ", index + 1, path);
-            eprint!("{}", label.cyan());
-        }
-        IngestEvent::GenerateDone { .. } => {
-            eprintln!("{}", "done".green());
-        }
+        IngestEvent::GenerateDone { .. } => {}
         IngestEvent::Done {
             ref session_id,
             ref usage,
         } => {
+            // Collapse generate block into one final line
+            let total_tokens = usage.input_tokens + usage.output_tokens;
+            eprint!(
+                "{UP}{UP}{CLEAR}\r  {} generated, {}K tokens  {}\n{CLEAR}\r",
+                "→".dimmed(),
+                total_tokens / 1000,
+                "done".green()
+            );
+            std::io::stderr().flush().ok();
             eprintln!();
             eprintln!("  {} session: {}", "✓".green().bold(), session_id.cyan());
             eprintln!(

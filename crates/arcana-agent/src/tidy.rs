@@ -60,7 +60,9 @@ pub enum TidyEvent {
     },
     GenerateNote {
         index: usize,
+        total: usize,
         path: String,
+        tokens_used: u64,
     },
     GenerateDone {
         index: usize,
@@ -795,7 +797,9 @@ async fn run_generate(
             event_tx,
             TidyEvent::GenerateNote {
                 index: i,
+                total: tasks.len(),
                 path: task.output_path.clone(),
+                tokens_used: total_usage.total(),
             },
         );
 

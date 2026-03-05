@@ -43,17 +43,52 @@ impl Default for IngestConfig {
 
 #[derive(Debug, Clone)]
 pub enum IngestEvent {
-    ExploreStart,
-    ExploreIteration { iteration: usize },
-    ExploreToolCall { name: String },
-    ExploreDone { iterations: usize },
+    ExploreStart {
+        max_iterations: usize,
+    },
+    ExploreIteration {
+        iteration: usize,
+        max_iterations: usize,
+        tool_count: usize,
+        tokens_used: u64,
+    },
+    ExploreToolCall {
+        name: String,
+        description: String,
+    },
+    ExploreBudgetExhausted {
+        used: u64,
+        budget: u64,
+    },
+    ExploreDone {
+        iterations: usize,
+        tool_count: usize,
+        tokens_used: u64,
+    },
     PlanStart,
-    PlanReady { plan: IngestPlan },
-    GenerateStart { total: usize },
-    GenerateNote { index: usize, path: String },
-    GenerateDone { index: usize, path: String },
-    Done { session_id: String, usage: Usage },
-    Error { message: String },
+    PlanReady {
+        plan: IngestPlan,
+    },
+    GenerateStart {
+        total: usize,
+    },
+    GenerateNote {
+        index: usize,
+        total: usize,
+        path: String,
+        tokens_used: u64,
+    },
+    GenerateDone {
+        index: usize,
+        path: String,
+    },
+    Done {
+        session_id: String,
+        usage: Usage,
+    },
+    Error {
+        message: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -563,7 +598,13 @@ async fn run_explore(
     config: &IngestConfig,
     event_tx: Option<&mpsc::UnboundedSender<IngestEvent>>,
 ) -> Result<(String, Usage)> {
-    send_event(event_tx, IngestEvent::ExploreStart);
+    let max_iters = config.max_explore_iterations;
+    send_event(
+        event_tx,
+        IngestEvent::ExploreStart {
+            max_iterations: max_iters,
+        },
+    );
 
     let system = build_system_prompt(
         profile.taxonomy(),
@@ -574,7 +615,7 @@ async fn run_explore(
     );
 
     let agent_config = AgentConfig {
-        max_iterations: config.max_explore_iterations,
+        max_iterations: max_iters,
         max_tokens: config.max_tokens / 2, // explore gets half the budget
     };
 
@@ -584,18 +625,35 @@ async fn run_explore(
         vault: vault_executor,
     };
 
-    // Bridge AgentEvents → IngestEvents
+    // Bridge AgentEvents → IngestEvents with running counters
     let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
     let ingest_tx = event_tx.cloned();
     let bridge = tokio::spawn(async move {
+        let mut tool_count: usize = 0;
+        let mut tokens_used: u64 = 0;
+
         while let Some(ev) = agent_rx.recv().await {
             if let Some(ref tx) = ingest_tx {
                 match ev {
                     AgentEvent::IterationStart { iteration } => {
-                        let _ = tx.send(IngestEvent::ExploreIteration { iteration });
+                        let _ = tx.send(IngestEvent::ExploreIteration {
+                            iteration,
+                            max_iterations: max_iters,
+                            tool_count,
+                            tokens_used,
+                        });
                     }
-                    AgentEvent::ToolStart { name } => {
-                        let _ = tx.send(IngestEvent::ExploreToolCall { name });
+                    AgentEvent::ToolStart { name, input } => {
+                        tool_count += 1;
+                        let description = describe_tool_call(&name, &input);
+                        let _ = tx.send(IngestEvent::ExploreToolCall { name, description });
+                    }
+                    AgentEvent::Done { usage } => {
+                        tokens_used = usage.total();
+                    }
+                    AgentEvent::TokenBudgetExhausted { used, budget } => {
+                        tokens_used = used;
+                        let _ = tx.send(IngestEvent::ExploreBudgetExhausted { used, budget });
                     }
                     _ => {}
                 }
@@ -627,10 +685,13 @@ async fn run_explore(
         .map(|s| s.to_string())
         .unwrap_or(text);
 
+    let iterations = messages.len() / 2; // approximate
     send_event(
         event_tx,
         IngestEvent::ExploreDone {
-            iterations: messages.len() / 2, // approximate
+            iterations,
+            tool_count: 0, // bridge tracked this but we don't have it here; CLI uses Done event
+            tokens_used: usage.total(),
         },
     );
 
@@ -764,7 +825,9 @@ async fn run_generate(
             event_tx,
             IngestEvent::GenerateNote {
                 index: i,
+                total: plan.notes.len(),
                 path: note.path.clone(),
+                tokens_used: total_usage.total(),
             },
         );
 
@@ -893,6 +956,41 @@ fn hash_project(project_executor: &ProjectToolExecutor) -> String {
 fn send_event(tx: Option<&mpsc::UnboundedSender<IngestEvent>>, event: IngestEvent) {
     if let Some(tx) = tx {
         let _ = tx.send(event);
+    }
+}
+
+/// Convert a raw tool call into a human-readable description.
+fn describe_tool_call(name: &str, input: &serde_json::Value) -> String {
+    match name {
+        "project_tree" => "tree".to_string(),
+        "project_list_files" => {
+            let glob = input["glob"].as_str().unwrap_or("*");
+            format!("listing {glob}")
+        }
+        "project_read_file" => {
+            let path = input["path"].as_str().unwrap_or("?");
+            format!("reading {path}")
+        }
+        "project_search" => {
+            let query = input["query"].as_str().unwrap_or("?");
+            format!("searching \"{query}\"")
+        }
+        "vault_search" => {
+            let query = input["query"].as_str().unwrap_or("?");
+            format!("vault search \"{query}\"")
+        }
+        "vault_list" => {
+            if let Some(prefix) = input["path_prefix"].as_str() {
+                format!("vault list {prefix}")
+            } else {
+                "vault list".to_string()
+            }
+        }
+        "vault_read" => {
+            let path = input["path"].as_str().unwrap_or("?");
+            format!("vault read {path}")
+        }
+        _ => name.to_string(),
     }
 }
 
@@ -1224,7 +1322,7 @@ mod tests {
 
         assert!(events
             .iter()
-            .any(|e| matches!(e, IngestEvent::ExploreStart)));
+            .any(|e| matches!(e, IngestEvent::ExploreStart { .. })));
         assert!(events
             .iter()
             .any(|e| matches!(e, IngestEvent::ExploreDone { .. })));

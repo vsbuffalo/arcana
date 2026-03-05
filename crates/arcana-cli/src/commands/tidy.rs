@@ -132,8 +132,8 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
             }
         };
 
-        // Let the event handler flush "done" before we print anything else
-        tokio::task::yield_now().await;
+        // Print plan completion synchronously (don't rely on async event handler)
+        eprintln!("{}", "done".green());
 
         if tidy.plan().actions.is_empty() {
             eprintln!("  {} nothing to tidy", "→".dimmed());
@@ -236,8 +236,12 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
     })
 }
 
+const UP: &str = "\x1b[A";
+const CLEAR: &str = "\x1b[2K";
+
 fn handle_event(event: &TidyEvent) {
     match event {
+        // -- Survey + Plan: single-line spinners --
         TidyEvent::SurveyStart { count } => {
             eprint!(
                 "  {} surveying {} note{}... ",
@@ -245,14 +249,16 @@ fn handle_event(event: &TidyEvent) {
                 count,
                 if *count == 1 { "" } else { "s" }
             );
+            std::io::stderr().flush().ok();
         }
         TidyEvent::SurveyNote { .. } => {}
         TidyEvent::PlanStart => {
             eprintln!("{}", "done".green());
-            eprint!("  {} generating plan... ", "→".dimmed());
+            eprint!("  {} planning... ", "→".dimmed());
+            std::io::stderr().flush().ok();
         }
         TidyEvent::PlanReady { .. } => {
-            eprintln!("{}", "done".green());
+            // "done" printed synchronously in main flow to avoid race
         }
         TidyEvent::ConflictWarning {
             ref path,
@@ -278,26 +284,42 @@ fn handle_event(event: &TidyEvent) {
                 existing_model.dimmed()
             );
         }
-        TidyEvent::GenerateStart { total } => {
+
+        // -- Generate: two-line progress block --
+        TidyEvent::GenerateStart { .. } => {
             eprintln!();
-            eprintln!(
-                "  {} generating {} note{}...",
+            eprintln!();
+            eprintln!();
+        }
+        TidyEvent::GenerateNote {
+            index,
+            total,
+            ref path,
+            tokens_used,
+        } => {
+            let status = format!(
+                "  {} generating [{}/{}]  {}K tokens",
                 "→".dimmed(),
+                index + 1,
                 total,
-                if *total == 1 { "" } else { "s" }
+                tokens_used / 1000,
             );
+            eprint!("{UP}{UP}{CLEAR}\r{status}\n{CLEAR}\r    writing {}\n", path.cyan());
+            std::io::stderr().flush().ok();
         }
-        TidyEvent::GenerateNote { index, ref path } => {
-            let label = format!("    [{}] {}... ", index + 1, path);
-            eprint!("{}", label.cyan());
-        }
-        TidyEvent::GenerateDone { .. } => {
-            eprintln!("{}", "done".green());
-        }
+        TidyEvent::GenerateDone { .. } => {}
         TidyEvent::Done {
             ref session_id,
             ref usage,
         } => {
+            let total_tokens = usage.input_tokens + usage.output_tokens;
+            eprint!(
+                "{UP}{UP}{CLEAR}\r  {} generated, {}K tokens  {}\n{CLEAR}\r",
+                "→".dimmed(),
+                total_tokens / 1000,
+                "done".green()
+            );
+            std::io::stderr().flush().ok();
             eprintln!();
             eprintln!("  {} session: {}", "✓".green().bold(), session_id.cyan());
             eprintln!(
@@ -313,7 +335,7 @@ fn handle_event(event: &TidyEvent) {
             );
         }
         TidyEvent::Error { ref message } => {
-            eprintln!("{}: {message}", "error".red().bold());
+            eprintln!("  {}: {message}", "warning".yellow().bold());
         }
     }
 }

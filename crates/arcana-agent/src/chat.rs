@@ -137,7 +137,10 @@ impl ChatSession {
             for call in &tool_calls {
                 if let ContentBlock::ToolUse { id, name, input } = call {
                     if let Some(tx) = event_tx {
-                        let _ = tx.send(AgentEvent::ToolStart { name: name.clone() });
+                        let _ = tx.send(AgentEvent::ToolStart {
+                            name: name.clone(),
+                            input: input.clone(),
+                        });
                     }
 
                     let result = executor.execute(name, input).await;

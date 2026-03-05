@@ -183,7 +183,7 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig, profile: Option<String>) -
                     let event_handle = tokio::spawn(async move {
                         while let Some(event) = event_rx.recv().await {
                             match event {
-                                AgentEvent::ToolStart { name } => {
+                                AgentEvent::ToolStart { name, .. } => {
                                     eprint!("  {} {name}... ", "tool:".dimmed());
                                 }
                                 AgentEvent::ToolFinish { .. } => {

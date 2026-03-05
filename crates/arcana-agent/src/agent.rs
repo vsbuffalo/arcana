@@ -31,7 +31,10 @@ impl Default for AgentConfig {
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     IterationStart { iteration: usize },
-    ToolStart { name: String },
+    ToolStart {
+        name: String,
+        input: serde_json::Value,
+    },
     ToolFinish { name: String },
     Text { text: String },
     TokenWarning { used: u64, budget: u64 },
@@ -144,7 +147,13 @@ pub async fn agent_loop(
         let mut results = Vec::new();
         for call in &tool_calls {
             if let ContentBlock::ToolUse { id, name, input } = call {
-                send_event(event_tx, AgentEvent::ToolStart { name: name.clone() });
+                send_event(
+                    event_tx,
+                    AgentEvent::ToolStart {
+                        name: name.clone(),
+                        input: input.clone(),
+                    },
+                );
 
                 let result = executor.execute(name, input).await;
 
@@ -302,7 +311,7 @@ mod tests {
         }
         assert!(events
             .iter()
-            .any(|e| matches!(e, AgentEvent::ToolStart { name } if name == "vault_search")));
+            .any(|e| matches!(e, AgentEvent::ToolStart { name, .. } if name == "vault_search")));
         assert!(events
             .iter()
             .any(|e| matches!(e, AgentEvent::ToolFinish { name } if name == "vault_search")));
