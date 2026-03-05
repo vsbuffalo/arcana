@@ -9,15 +9,34 @@ use colored::Colorize;
 use tokio::sync::Mutex;
 
 #[derive(Args)]
+#[command(
+    about = "Reorganize existing vault notes — move, split, and extract concepts",
+    after_help = "\
+Unlike ingest (which creates new notes from external sources), tidy works on
+notes already in your vault. It reads messy or misplaced notes, proposes a
+reorganization plan (moves, splits, concept extractions), and generates
+rewritten drafts that fit your vault's taxonomy.
+
+Tidy requires a target — a path, file, or tag filter — to prevent
+accidentally reorganizing your entire vault in one expensive operation.
+
+Examples:
+  arcana tidy inbox/              tidy all notes in inbox/
+  arcana tidy inbox/brain-dump.md tidy a single note
+  arcana tidy --tags unprocessed  tidy all notes tagged #unprocessed
+  arcana tidy notes/ --tags draft tidy drafts under notes/
+
+All output lands in .arcana/drafts/ — use 'arcana review' to approve."
+)]
 pub struct TidyArgs {
-    /// Path or glob to tidy (e.g. "inbox/", "inbox/dump.md")
+    /// Path or file to tidy (e.g. "inbox/", "inbox/dump.md")
     pub target: Option<String>,
 
     /// Run all phases without prompting
     #[arg(long)]
     pub auto: bool,
 
-    /// Filter by tag instead of path
+    /// Filter notes by tag (e.g. --tags unprocessed --tags draft)
     #[arg(long)]
     pub tags: Vec<String>,
 
@@ -391,10 +410,16 @@ fn resolve_targets(vault: &arcana_core::Vault, args: &TidyArgs) -> Result<Vec<St
     }
 
     // Otherwise, resolve by path/name
-    let target = args
-        .target
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("specify a target path (e.g. 'inbox/') or use --tags"))?;
+    let target = args.target.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "specify a target path or use --tags\n\n\
+             examples:\n  \
+             arcana tidy inbox/\n  \
+             arcana tidy inbox/brain-dump.md\n  \
+             arcana tidy --tags unprocessed\n\n\
+             see 'arcana tidy --help' for more"
+        )
+    })?;
 
     // 1. Exact file path
     let full_path = vault.root().join(target);

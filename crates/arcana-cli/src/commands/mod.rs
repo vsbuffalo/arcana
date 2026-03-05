@@ -47,7 +47,7 @@ pub enum Commands {
     Diff(diff::DiffArgs),
     /// Restore a note to a previous version
     Restore(restore::RestoreArgs),
-    /// Tidy inbox notes into structured vault notes using an LLM
+    /// Reorganize existing vault notes — move, split, and extract concepts
     Tidy(tidy::TidyArgs),
     /// Ingest an external project into vault notes using an LLM
     Ingest(ingest::IngestArgs),
