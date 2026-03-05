@@ -1,5 +1,7 @@
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use crate::errors::{ArcanaError, Result};
 
@@ -83,16 +85,38 @@ fn merge_toml_values(base: &mut toml::Value, overlay: toml::Value) {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ArcanaConfig {
     pub vault: VaultConfig,
     pub index: IndexConfig,
     pub search: SearchConfig,
-    pub llm: LlmConfig,
     pub agent: AgentSettings,
     pub git: GitConfig,
     pub drafts: DraftsConfig,
+    /// Default LLM profile name — must exist in `[profiles]`.
+    pub default_profile: String,
+    /// Named LLM profiles. Each is a complete `LlmConfig`.
+    pub profiles: HashMap<String, LlmConfig>,
+    /// Backward compat: `[llm]` block used as fallback when no profiles are defined.
+    #[serde(default)]
+    llm: Option<LlmConfig>,
+}
+
+impl Default for ArcanaConfig {
+    fn default() -> Self {
+        Self {
+            vault: VaultConfig::default(),
+            index: IndexConfig::default(),
+            search: SearchConfig::default(),
+            agent: AgentSettings::default(),
+            git: GitConfig::default(),
+            drafts: DraftsConfig::default(),
+            default_profile: "default".to_string(),
+            profiles: HashMap::new(),
+            llm: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,9 +153,29 @@ pub struct SearchConfig {
 pub struct LlmConfig {
     pub provider: String,
     pub model: String,
-    pub api_key_env: String,
+    /// Env var name holding the API key. If `None`, auto-resolved from provider
+    /// (e.g. `anthropic` → `ANTHROPIC_API_KEY`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+}
+
+impl LlmConfig {
+    /// Returns the effective `api_key_env` — explicit value or conventional
+    /// default for the provider.
+    pub fn effective_api_key_env(&self) -> Option<&str> {
+        if let Some(ref env) = self.api_key_env {
+            return Some(env);
+        }
+        match self.provider.as_str() {
+            "anthropic" => Some("ANTHROPIC_API_KEY"),
+            "openai" => Some("OPENAI_API_KEY"),
+            _ => None,
+        }
+    }
 }
 
 impl Default for LlmConfig {
@@ -139,7 +183,7 @@ impl Default for LlmConfig {
         Self {
             provider: "anthropic".to_string(),
             model: "claude-sonnet-4-5-20250929".to_string(),
-            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            api_key_env: None,
             endpoint: None,
             max_output_tokens: None,
         }
@@ -176,6 +220,7 @@ impl Default for AgentSettings {
 pub struct OperationOverrides {
     pub max_iterations: Option<usize>,
     pub max_tokens: Option<usize>,
+    pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -269,6 +314,56 @@ impl ArcanaConfig {
         }
     }
 
+    /// Resolve the effective LLM config. Priority (later wins):
+    ///
+    /// 1. `default_profile` (or `[llm]` fallback for backward compat)
+    /// 2. `op_profile` — per-operation default from `[agent.<op>].profile`
+    /// 3. `cli_profile` — `--profile` / `ARCANA_PROFILE` CLI flag
+    /// 4. `--provider` / `--model` CLI flags
+    pub fn resolve_llm(
+        &self,
+        cli_profile: Option<&str>,
+        op_profile: Option<&str>,
+        cli_provider: Option<&str>,
+        cli_model: Option<&str>,
+    ) -> Result<LlmConfig> {
+        // Pick the effective profile name: --profile > op default > default_profile
+        let profile_name = cli_profile
+            .or(op_profile)
+            .unwrap_or(&self.default_profile);
+
+        let mut llm = if let Some(profile) = self.profiles.get(profile_name) {
+            profile.clone()
+        } else if let Some(ref legacy) = self.llm {
+            // Backward compat: [llm] block used when profile not found in map
+            legacy.clone()
+        } else if self.profiles.is_empty() {
+            // Zero config: no profiles, no [llm] → use compiled defaults
+            LlmConfig::default()
+        } else {
+            let mut available: Vec<&str> =
+                self.profiles.keys().map(|k| k.as_str()).collect();
+            available.sort();
+            return Err(ArcanaError::Config(format!(
+                "profile '{}' not found (available: {})",
+                profile_name,
+                available.join(", ")
+            )));
+        };
+
+        // CLI flags override everything
+        if let Some(provider) = cli_provider {
+            llm.provider = provider.to_string();
+            // Clear api_key_env so it auto-resolves for the new provider
+            llm.api_key_env = None;
+        }
+        if let Some(model) = cli_model {
+            llm.model = model.to_string();
+        }
+
+        Ok(llm)
+    }
+
     pub fn is_excluded(&self, path: &Path) -> bool {
         for component in path.components() {
             let s = component.as_os_str().to_string_lossy();
@@ -316,6 +411,10 @@ mod tests {
         assert_eq!(config.search.default_limit, 20);
         assert_eq!(config.agent.max_tokens, 200_000);
         assert_eq!(config.agent.max_output_tokens, 8192);
+        assert_eq!(config.default_profile, "default");
+        // Zero config works — resolve_llm falls back to compiled defaults
+        let llm = config.resolve_llm(None, None, None, None).unwrap();
+        assert_eq!(llm.provider, "anthropic");
     }
 
     #[test]
@@ -338,7 +437,7 @@ mod tests {
     fn merge_toml_deep() {
         let mut base = toml::from_str::<toml::Value>(
             r#"
-            [llm]
+            [profiles.sonnet]
             model = "claude-sonnet"
             provider = "anthropic"
 
@@ -350,7 +449,7 @@ mod tests {
 
         let overlay = toml::from_str::<toml::Value>(
             r#"
-            [llm]
+            [profiles.sonnet]
             model = "claude-haiku"
 
             [agent.ingest]
@@ -362,13 +461,13 @@ mod tests {
         merge_toml_values(&mut base, overlay);
 
         let table = base.as_table().unwrap();
-        // llm.model overridden, llm.provider preserved
+        // profiles.sonnet.model overridden, provider preserved
         assert_eq!(
-            table["llm"]["model"].as_str().unwrap(),
+            table["profiles"]["sonnet"]["model"].as_str().unwrap(),
             "claude-haiku"
         );
         assert_eq!(
-            table["llm"]["provider"].as_str().unwrap(),
+            table["profiles"]["sonnet"]["provider"].as_str().unwrap(),
             "anthropic"
         );
         // agent.max_tokens preserved, agent.ingest.max_tokens added
@@ -386,27 +485,57 @@ mod tests {
     fn load_merged_no_files() {
         let config = load_merged(None, None).unwrap();
         assert_eq!(config.agent.max_tokens, 200_000);
-        assert_eq!(config.llm.provider, "anthropic");
+        let llm = config.resolve_llm(None, None, None, None).unwrap();
+        assert_eq!(llm.provider, "anthropic");
     }
 
     #[test]
-    fn load_merged_global_only() {
+    fn load_merged_global_with_profiles() {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("config.toml");
         std::fs::write(
             &global,
             r#"
-            [llm]
+            default_profile = "sonnet"
+
+            [profiles.sonnet]
+            provider = "anthropic"
+            model = "claude-sonnet-4-5-20250929"
+
+            [profiles.haiku]
+            provider = "anthropic"
             model = "claude-haiku-4-5-20251001"
             "#,
         )
         .unwrap();
 
         let config = load_merged(Some(&global), None).unwrap();
-        assert_eq!(config.llm.model, "claude-haiku-4-5-20251001");
-        // Defaults preserved
-        assert_eq!(config.llm.provider, "anthropic");
+        let llm = config.resolve_llm(None, None, None, None).unwrap();
+        assert_eq!(llm.model, "claude-sonnet-4-5-20250929");
+        let llm = config.resolve_llm(Some("haiku"), None, None, None).unwrap();
+        assert_eq!(llm.model, "claude-haiku-4-5-20251001");
         assert_eq!(config.agent.max_tokens, 200_000);
+    }
+
+    #[test]
+    fn load_merged_backward_compat_llm_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("config.toml");
+        std::fs::write(
+            &global,
+            r#"
+            [llm]
+            provider = "anthropic"
+            model = "claude-haiku-4-5-20251001"
+            "#,
+        )
+        .unwrap();
+
+        // No profiles defined — [llm] block is used as fallback
+        let config = load_merged(Some(&global), None).unwrap();
+        let llm = config.resolve_llm(None, None, None, None).unwrap();
+        assert_eq!(llm.model, "claude-haiku-4-5-20251001");
+        assert_eq!(llm.provider, "anthropic");
     }
 
     #[test]
@@ -416,8 +545,11 @@ mod tests {
         std::fs::write(
             &global,
             r#"
-            [llm]
-            model = "claude-haiku-4-5-20251001"
+            default_profile = "sonnet"
+
+            [profiles.sonnet]
+            provider = "anthropic"
+            model = "claude-sonnet-4-5-20250929"
 
             [agent]
             max_tokens = 300000
@@ -436,13 +568,10 @@ mod tests {
         .unwrap();
 
         let config = load_merged(Some(&global), Some(&vault)).unwrap();
-        // Global: model override
-        assert_eq!(config.llm.model, "claude-haiku-4-5-20251001");
-        // Global: agent.max_tokens
+        let llm = config.resolve_llm(None, None, None, None).unwrap();
+        assert_eq!(llm.model, "claude-sonnet-4-5-20250929");
         assert_eq!(config.agent.max_tokens, 300000);
-        // Vault-local: ingest override
         assert_eq!(config.agent.ingest.max_tokens, Some(500000));
-        // Tidy unset
         assert_eq!(config.agent.tidy.max_tokens, None);
     }
 
@@ -463,5 +592,149 @@ mod tests {
             .max_iterations
             .unwrap_or(config.agent.max_iterations);
         assert_eq!(ingest_iters, 20);
+    }
+
+    fn config_with_profiles() -> ArcanaConfig {
+        let mut config = ArcanaConfig::default();
+        config.default_profile = "sonnet".into();
+        config.profiles.clear();
+        config.profiles.insert(
+            "sonnet".into(),
+            LlmConfig {
+                provider: "anthropic".into(),
+                model: "claude-sonnet-4-5-20250929".into(),
+                ..Default::default()
+            },
+        );
+        config.profiles.insert(
+            "opus".into(),
+            LlmConfig {
+                provider: "anthropic".into(),
+                model: "claude-opus-4-6-20250918".into(),
+                ..Default::default()
+            },
+        );
+        config.profiles.insert(
+            "local".into(),
+            LlmConfig {
+                provider: "ollama".into(),
+                model: "llama3.1".into(),
+                endpoint: Some("http://localhost:11434/v1".into()),
+                ..Default::default()
+            },
+        );
+        config.profiles.insert(
+            "openai".into(),
+            LlmConfig {
+                provider: "openai".into(),
+                model: "gpt-4o".into(),
+                api_key_env: Some("OPENAI_API_KEY".into()),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    #[test]
+    fn resolve_llm_default_profile() {
+        let config = config_with_profiles();
+        let llm = config.resolve_llm(None, None, None, None).unwrap();
+        assert_eq!(llm.provider, "anthropic");
+        assert_eq!(llm.model, "claude-sonnet-4-5-20250929");
+        assert_eq!(llm.effective_api_key_env(), Some("ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn resolve_llm_named_profile() {
+        let config = config_with_profiles();
+        let llm = config.resolve_llm(Some("opus"), None, None, None).unwrap();
+        assert_eq!(llm.provider, "anthropic");
+        assert_eq!(llm.model, "claude-opus-4-6-20250918");
+    }
+
+    #[test]
+    fn resolve_llm_cli_overrides_profile() {
+        let config = config_with_profiles();
+        let llm = config
+            .resolve_llm(Some("local"), None, None, Some("phi3"))
+            .unwrap();
+        assert_eq!(llm.provider, "ollama");
+        assert_eq!(llm.model, "phi3"); // --model overrides
+    }
+
+    #[test]
+    fn resolve_llm_profile_not_found() {
+        let config = config_with_profiles();
+        let err = config
+            .resolve_llm(Some("nope"), None, None, None)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("nope"), "error should mention the name");
+        assert!(msg.contains("opus"), "error should list available profiles");
+    }
+
+    #[test]
+    fn resolve_llm_cli_profile_beats_op_default() {
+        let config = config_with_profiles();
+        // --profile "local" beats op default "opus"
+        let llm = config
+            .resolve_llm(Some("local"), Some("opus"), None, None)
+            .unwrap();
+        assert_eq!(llm.provider, "ollama");
+        assert_eq!(llm.model, "llama3.1");
+    }
+
+    #[test]
+    fn resolve_llm_op_default_used_when_no_cli_profile() {
+        let config = config_with_profiles();
+        let llm = config
+            .resolve_llm(None, Some("opus"), None, None)
+            .unwrap();
+        assert_eq!(llm.model, "claude-opus-4-6-20250918");
+    }
+
+    #[test]
+    fn effective_api_key_env_auto_resolves() {
+        // anthropic auto-resolves
+        let llm = LlmConfig {
+            provider: "anthropic".into(),
+            ..Default::default()
+        };
+        assert_eq!(llm.effective_api_key_env(), Some("ANTHROPIC_API_KEY"));
+
+        // openai auto-resolves
+        let llm = LlmConfig {
+            provider: "openai".into(),
+            ..Default::default()
+        };
+        assert_eq!(llm.effective_api_key_env(), Some("OPENAI_API_KEY"));
+
+        // ollama has no key
+        let llm = LlmConfig {
+            provider: "ollama".into(),
+            ..Default::default()
+        };
+        assert_eq!(llm.effective_api_key_env(), None);
+
+        // explicit api_key_env overrides auto-resolve
+        let llm = LlmConfig {
+            provider: "anthropic".into(),
+            api_key_env: Some("MY_CUSTOM_KEY".into()),
+            ..Default::default()
+        };
+        assert_eq!(llm.effective_api_key_env(), Some("MY_CUSTOM_KEY"));
+    }
+
+    #[test]
+    fn resolve_llm_cli_provider_clears_api_key_env() {
+        let config = config_with_profiles();
+        // --provider openai on a profile that had explicit api_key_env
+        let llm = config
+            .resolve_llm(Some("openai"), None, Some("anthropic"), None)
+            .unwrap();
+        // --provider cleared api_key_env, so it auto-resolves for anthropic
+        assert_eq!(llm.provider, "anthropic");
+        assert_eq!(llm.effective_api_key_env(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(llm.api_key_env, None);
     }
 }

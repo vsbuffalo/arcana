@@ -35,12 +35,15 @@ pub use types::{ContentBlock, LlmResponse, Message, StopReason, ToolDef, Usage};
 use arcana_core::LlmConfig;
 
 /// Create an LLM backend from config. Resolves the API key from environment.
+///
+/// Uses `LlmConfig::effective_api_key_env()` to auto-resolve the env var name
+/// from the provider when not explicitly set (e.g. `anthropic` → `ANTHROPIC_API_KEY`).
 pub fn create_backend(config: &LlmConfig) -> error::Result<Box<dyn LlmBackend>> {
     let max_output_tokens = config.max_output_tokens.unwrap_or(8192);
 
     match config.provider.as_str() {
         "anthropic" => {
-            let api_key = resolve_api_key(&config.api_key_env)?;
+            let api_key = resolve_api_key(config)?;
             Ok(Box::new(backend::anthropic::AnthropicBackend::new(
                 api_key,
                 Some(config.model.clone()),
@@ -48,7 +51,7 @@ pub fn create_backend(config: &LlmConfig) -> error::Result<Box<dyn LlmBackend>> 
             )))
         }
         "openai" => {
-            let api_key = resolve_api_key(&config.api_key_env)?;
+            let api_key = resolve_api_key(config)?;
             Ok(Box::new(backend::openai::OpenAiBackend::new(
                 config
                     .endpoint
@@ -71,7 +74,13 @@ pub fn create_backend(config: &LlmConfig) -> error::Result<Box<dyn LlmBackend>> 
     }
 }
 
-fn resolve_api_key(env_var: &str) -> error::Result<String> {
+fn resolve_api_key(config: &LlmConfig) -> error::Result<String> {
+    let env_var = config.effective_api_key_env().ok_or_else(|| {
+        AgentError::Config(format!(
+            "provider '{}' requires api_key_env to be set (no default for this provider)",
+            config.provider
+        ))
+    })?;
     std::env::var(env_var).map_err(|_| AgentError::MissingApiKey(env_var.to_string()))
 }
 
@@ -96,7 +105,7 @@ mod tests {
         std::env::remove_var("TEST_NONEXISTENT_KEY_12345");
         let config = LlmConfig {
             provider: "anthropic".into(),
-            api_key_env: "TEST_NONEXISTENT_KEY_12345".into(),
+            api_key_env: Some("TEST_NONEXISTENT_KEY_12345".into()),
             ..Default::default()
         };
         match create_backend(&config) {

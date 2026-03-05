@@ -7,7 +7,7 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use commands::{Commands, Run};
+use commands::Commands;
 
 const WORKFLOWS_HELP: &str = "\
 \x1b[1mWorkflows:\x1b[0m
@@ -121,6 +121,10 @@ pub struct Cli {
     #[arg(long, global = true, env = "ARCANA_USER_EMAIL")]
     email: Option<String>,
 
+    /// LLM profile to use (defined in [profiles.<name>] config)
+    #[arg(short = 'P', long, global = true, env = "ARCANA_PROFILE")]
+    profile: Option<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -178,7 +182,7 @@ fn main() -> Result<()> {
         config.git.user_email = email;
     }
 
-    cli.command.run(config, cli.json)
+    cli.command.run(config, cli.json, cli.profile)
 }
 
 fn resolve_vault_path(explicit: Option<PathBuf>) -> Result<PathBuf> {

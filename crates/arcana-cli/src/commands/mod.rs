@@ -59,8 +59,8 @@ pub trait Run {
     fn run(self, config: ArcanaConfig, json: bool) -> Result<()>;
 }
 
-impl Run for Commands {
-    fn run(self, config: ArcanaConfig, json: bool) -> Result<()> {
+impl Commands {
+    pub fn run(self, config: ArcanaConfig, json: bool, profile: Option<String>) -> Result<()> {
         match self {
             Commands::Index(args) => args.run(config, json),
             Commands::Search(args) => args.run(config, json),
@@ -68,15 +68,15 @@ impl Run for Commands {
             Commands::Create(args) => args.run(config, json),
             Commands::Stats => stats::run_stats(config, json),
             Commands::Serve(args) => serve::run_serve(args, config),
-            Commands::Chat(args) => chat::run_chat(args, config),
+            Commands::Chat(args) => chat::run_chat(args, config, profile),
             Commands::Review(args) => review::run_review(args, config, json),
             Commands::Blame(args) => blame::run_blame(args, config, json),
             Commands::Context(args) => context::run_context(args, config),
             Commands::Log(args) => log::run_log(args, config, json),
             Commands::Diff(args) => diff::run_diff(args, config, json),
             Commands::Restore(args) => restore::run_restore(args, config, json),
-            Commands::Tidy(args) => tidy::run_tidy(args, config),
-            Commands::Ingest(args) => ingest::run_ingest(args, config),
+            Commands::Tidy(args) => tidy::run_tidy(args, config, profile),
+            Commands::Ingest(args) => ingest::run_ingest(args, config, profile),
             Commands::Skills(args) => skills::run_skills(args, config, json),
         }
     }

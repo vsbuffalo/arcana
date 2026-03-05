@@ -30,7 +30,7 @@ pub struct IngestArgs {
     pub model: Option<String>,
 }
 
-pub fn run_ingest(args: IngestArgs, config: ArcanaConfig) -> Result<()> {
+pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String>) -> Result<()> {
     let vault = arcana_core::Vault::open(config.clone())?;
     crate::output::print_git_init_info(&vault);
     vault.index()?;
@@ -46,19 +46,15 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig) -> Result<()> {
         std::process::exit(1);
     }
 
-    // Build LLM config with CLI overrides
-    let mut llm_config = config.llm.clone();
-    if let Some(provider) = &args.provider {
-        llm_config.provider = provider.clone();
-        match provider.as_str() {
-            "anthropic" => llm_config.api_key_env = "ANTHROPIC_API_KEY".into(),
-            "openai" => llm_config.api_key_env = "OPENAI_API_KEY".into(),
-            _ => {}
-        }
-    }
-    if let Some(model) = &args.model {
-        llm_config.model = model.clone();
-    }
+    // Resolve LLM config: base → op profile → --profile → --provider/--model
+    let llm_config = config
+        .resolve_llm(
+            profile.as_deref(),
+            config.agent.ingest.profile.as_deref(),
+            args.provider.as_deref(),
+            args.model.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     let backend = arcana_agent::create_backend(&llm_config).map_err(|e| {
         anyhow::anyhow!(
