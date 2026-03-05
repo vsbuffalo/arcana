@@ -274,42 +274,45 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
     })
 }
 
-const CLEAR: &str = "\x1b[2K";
-const UP: &str = "\x1b[A";
-
 fn handle_event(event: &IngestEvent) {
     match event {
-        // -- Explore: single-line progress, rewrites in place --
-        IngestEvent::ExploreStart { .. } => {
-            eprint!("  {} exploring...", "→".dimmed());
-            std::io::stderr().flush().ok();
-        }
+        IngestEvent::ExploreStart { .. } => {}
         IngestEvent::ExploreIteration {
             iteration,
             max_iterations,
             tool_count,
             tokens_used,
         } => {
-            eprint!(
-                "{CLEAR}\r  {} exploring [{}/{}]  {} tools, {}K tokens",
-                "→".dimmed(),
-                iteration + 1,
-                max_iterations,
-                tool_count,
-                tokens_used / 1000,
-            );
-            std::io::stderr().flush().ok();
+            if *iteration == 0 {
+                eprintln!("  {} [{}/{}]", "explore".bold(), iteration + 1, max_iterations);
+            } else {
+                eprintln!();
+                eprintln!(
+                    "  {} [{}/{}]  {}",
+                    "explore".bold(),
+                    iteration + 1,
+                    max_iterations,
+                    format!("{} calls, {}K tokens", tool_count, tokens_used / 1000).dimmed(),
+                );
+            }
         }
         IngestEvent::ExploreToolCall {
             ref description, ..
         } => {
-            // Append tool description after the status on same line
-            eprint!("  {}", description.dimmed());
-            std::io::stderr().flush().ok();
+            eprintln!("    {}", description.dimmed());
+        }
+        IngestEvent::ExploreBudgetWarning { used, budget } => {
+            eprintln!();
+            eprintln!(
+                "    {} 75% of explore budget used ({}K/{}K) — wrapping up",
+                "!".yellow(),
+                used / 1000,
+                budget / 1000,
+            );
         }
         IngestEvent::ExploreBudgetExhausted { used, budget } => {
             eprintln!(
-                "{CLEAR}\r  {} explore token budget exhausted ({}K/{}K)",
+                "    {} budget exhausted ({}K/{}K)",
                 "!".yellow().bold(),
                 used / 1000,
                 budget / 1000,
@@ -320,62 +323,46 @@ fn handle_event(event: &IngestEvent) {
             tokens_used,
             ..
         } => {
+            eprintln!();
             eprintln!(
-                "{CLEAR}\r  {} explored {iterations} iterations, {}K tokens  {}",
-                "→".dimmed(),
+                "  {} {iterations} iterations, {}K tokens  {}",
+                "explored".bold(),
                 tokens_used / 1000,
                 "done".green()
             );
         }
-
-        // -- Plan: single-line spinner --
         IngestEvent::PlanStart => {
-            eprint!("  {} planning... ", "→".dimmed());
+            eprint!("  planning... ");
             std::io::stderr().flush().ok();
         }
-        IngestEvent::PlanReady { .. } => {
-            // "done" printed synchronously in main flow to avoid race
-        }
-
-        // -- Generate: two-line progress block --
+        IngestEvent::PlanReady { .. } => {}
         IngestEvent::GenerateStart { .. } => {
-            // Set up two-line block (blank status + blank detail)
-            // Extra blank line for spacing after plan output
-            eprintln!();
-            eprintln!();
             eprintln!();
         }
         IngestEvent::GenerateNote {
             index,
             total,
             ref path,
-            tokens_used,
+            ..
         } => {
-            // Rewrite both lines
-            let status = format!(
-                "  {} generating [{}/{}]  {}K tokens",
-                "→".dimmed(),
-                index + 1,
-                total,
-                tokens_used / 1000,
+            eprintln!(
+                "  {} {}",
+                format!("[{}/{}]", index + 1, total).dimmed(),
+                path.cyan(),
             );
-            eprint!("{UP}{UP}{CLEAR}\r{status}\n{CLEAR}\r    writing {}\n", path.cyan());
-            std::io::stderr().flush().ok();
         }
         IngestEvent::GenerateDone { .. } => {}
         IngestEvent::Done {
             ref session_id,
             ref usage,
         } => {
-            // Collapse generate block into one final line
-            let total_tokens = usage.input_tokens + usage.output_tokens;
-            eprint!(
-                "{UP}{UP}{CLEAR}\r  {} generated, {}K tokens  {}\n{CLEAR}\r",
-                "→".dimmed(),
-                total_tokens / 1000,
+            eprintln!();
+            eprintln!(
+                "  {} {}K tokens  {}",
+                "generated".bold(),
+                (usage.input_tokens + usage.output_tokens) / 1000,
                 "done".green()
             );
-            std::io::stderr().flush().ok();
             eprintln!();
             eprintln!("  {} session: {}", "✓".green().bold(), session_id.cyan());
             eprintln!(
@@ -391,7 +378,7 @@ fn handle_event(event: &IngestEvent) {
             );
         }
         IngestEvent::Error { ref message } => {
-            eprintln!("  {}: {message}", "warning".yellow().bold());
+            eprintln!("    {}: {message}", "warning".yellow().bold());
         }
     }
 }

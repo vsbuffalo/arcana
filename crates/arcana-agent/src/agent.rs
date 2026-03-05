@@ -13,6 +13,9 @@ use crate::types::{ContentBlock, Message, StopReason, Usage};
 pub struct AgentConfig {
     pub max_iterations: usize,
     pub max_tokens: u64,
+    /// Message injected into the conversation when token usage hits 75%.
+    /// Tells the AI to wrap up. If None, no injection (just the log warning).
+    pub wrap_up_message: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -20,6 +23,7 @@ impl Default for AgentConfig {
         Self {
             max_iterations: 20,
             max_tokens: 100_000,
+            wrap_up_message: None,
         }
     }
 }
@@ -88,7 +92,7 @@ pub async fn agent_loop(
             );
             return Ok((response.text(), total_usage));
         }
-        if !warned_50pct && total_tokens >= config.max_tokens / 2 {
+        if !warned_50pct && total_tokens >= config.max_tokens * 3 / 4 {
             warned_50pct = true;
             send_event(
                 event_tx,
@@ -97,10 +101,13 @@ pub async fn agent_loop(
                     budget: config.max_tokens,
                 },
             );
-            warn!(
-                "token usage at 50%: {total_tokens}/{} tokens",
+            info!(
+                "token usage at 75%: {total_tokens}/{} tokens, injecting wrap-up",
                 config.max_tokens
             );
+            if let Some(ref msg) = config.wrap_up_message {
+                messages.push(Message::user(msg.clone()));
+            }
         }
 
         // Check stop reason
@@ -346,6 +353,7 @@ mod tests {
         let config = AgentConfig {
             max_iterations: 20,
             max_tokens: 100, // Very small budget
+            wrap_up_message: None,
         };
 
         let mut messages = vec![Message::user("search")];

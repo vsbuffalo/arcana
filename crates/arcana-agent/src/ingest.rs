@@ -56,6 +56,10 @@ pub enum IngestEvent {
         name: String,
         description: String,
     },
+    ExploreBudgetWarning {
+        used: u64,
+        budget: u64,
+    },
     ExploreBudgetExhausted {
         used: u64,
         budget: u64,
@@ -598,7 +602,17 @@ async fn run_explore(
     config: &IngestConfig,
     event_tx: Option<&mpsc::UnboundedSender<IngestEvent>>,
 ) -> Result<(String, Usage)> {
-    let max_iters = config.max_explore_iterations;
+    // Scale iterations with project size, capped by config
+    let file_count = project_executor.file_count();
+    let auto_iters = if file_count < 100 {
+        10
+    } else if file_count < 1000 {
+        15
+    } else {
+        20
+    };
+    let max_iters = auto_iters.min(config.max_explore_iterations);
+
     send_event(
         event_tx,
         IngestEvent::ExploreStart {
@@ -617,6 +631,12 @@ async fn run_explore(
     let agent_config = AgentConfig {
         max_iterations: max_iters,
         max_tokens: config.max_tokens / 2, // explore gets half the budget
+        wrap_up_message: Some(
+            "You are running low on your token budget. Stop exploring now and provide your \
+             exploration summary with what you have gathered so far. Do not make any more \
+             tool calls — just write your summary."
+                .into(),
+        ),
     };
 
     // Composite executor: project tools + read-only vault tools
@@ -651,6 +671,9 @@ async fn run_explore(
                     AgentEvent::Done { usage } => {
                         tokens_used = usage.total();
                     }
+                    AgentEvent::TokenWarning { used, budget } => {
+                        let _ = tx.send(IngestEvent::ExploreBudgetWarning { used, budget });
+                    }
                     AgentEvent::TokenBudgetExhausted { used, budget } => {
                         tokens_used = used;
                         let _ = tx.send(IngestEvent::ExploreBudgetExhausted { used, budget });
@@ -661,9 +684,22 @@ async fn run_explore(
         }
     });
 
-    let mut messages = vec![Message::user(
-        "Explore this project and summarize your findings.",
-    )];
+    // Give the AI context about budget and project size so it can pace itself
+    let budget_k = agent_config.max_tokens / 1000;
+    let strategy_hint = if file_count < 100 {
+        "This is a small project — you can afford to read most files."
+    } else if file_count < 1000 {
+        "This is a medium project — read key files (READMEs, entry points, config), skim the rest via tree and search."
+    } else {
+        "This is a large project — be very selective. Use tree and search to navigate, only read the most important files."
+    };
+    let initial_msg = format!(
+        "Explore this project and summarize your findings.\n\n\
+         Context: this project has ~{file_count} files. Your token budget for exploration \
+         is {budget_k}K tokens. {strategy_hint} \
+         You will be warned when your budget is running low."
+    );
+    let mut messages = vec![Message::user(initial_msg)];
 
     let result = agent_loop(
         llm,

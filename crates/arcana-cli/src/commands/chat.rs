@@ -50,6 +50,7 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig, profile: Option<String>) -
     let agent_config = AgentConfig {
         max_iterations: args.max_iterations.unwrap_or(config.agent.max_iterations),
         max_tokens: config.agent.max_tokens as u64,
+        wrap_up_message: None,
     };
 
     let profile = vault.profile().clone();
@@ -137,6 +138,7 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig, profile: Option<String>) -
                                         .max_iterations
                                         .unwrap_or(config.agent.max_iterations),
                                     max_tokens: config.agent.max_tokens as u64,
+                                    wrap_up_message: None,
                                 },
                                 &profile,
                             );

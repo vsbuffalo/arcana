@@ -54,6 +54,21 @@ impl ProjectToolExecutor {
         Ok(Self { root })
     }
 
+    /// Approximate file count (respects ignore rules, capped at 10K for speed).
+    pub fn file_count(&self) -> usize {
+        walkdir::WalkDir::new(&self.root)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                !DEFAULT_IGNORE_DIRS.iter().any(|d| name == *d)
+                    && !IGNORE_SUFFIXES.iter().any(|s| name.ends_with(s))
+            })
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_file())
+            .take(10_000)
+            .count()
+    }
+
     /// Tool definitions for use with LLM tool-use.
     pub fn tool_defs() -> Vec<ToolDef> {
         vec![
