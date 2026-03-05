@@ -106,6 +106,10 @@ impl Vault {
         &self.root
     }
 
+    pub fn config(&self) -> &ArcanaConfig {
+        &self.config
+    }
+
     pub fn git_init_info(&self) -> Option<&InitInfo> {
         self.init_info.as_ref()
     }

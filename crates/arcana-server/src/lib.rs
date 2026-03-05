@@ -2,7 +2,12 @@ pub mod oauth;
 
 use std::sync::Arc;
 
-use arcana_core::{Frontmatter, SearchFilters, SearchQuery, SessionMeta, Vault, VaultStats};
+use std::path::PathBuf;
+
+use arcana_core::{
+    ArcanaConfig, Frontmatter, SearchFilters, SearchQuery, SessionMeta, Vault, VaultStats,
+    VaultWatcher, WatchHandle,
+};
 pub use oauth::OAuthConfig;
 use rmcp::{
     handler::server::tool::ToolRouter,
@@ -18,7 +23,7 @@ use rmcp::{
     ServerHandler,
 };
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Tool input structs
@@ -558,13 +563,21 @@ pub async fn serve_sse(
 ) -> anyhow::Result<()> {
     let tree = vault.vault_tree().unwrap_or_default();
     let instructions = build_mcp_instructions(vault.profile(), &tree);
+    let vault_root = vault.root().to_path_buf();
+    let vault_config = vault.config().clone();
     let vault = Arc::new(tokio::sync::Mutex::new(vault));
+
+    // Start file watcher for live reindexing
+    let watcher_vault = vault.clone();
+    start_watcher(vault_root, vault_config, watcher_vault);
+
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
 
+    let service_vault = vault.clone();
     let service = StreamableHttpService::new(
         move || {
-            let vault = vault.clone();
+            let vault = service_vault.clone();
             let instructions = instructions.clone();
             Ok(ArcanaServer {
                 vault,
@@ -641,4 +654,73 @@ pub async fn serve_sse(
         .with_graceful_shutdown(async move { ct.cancelled().await })
         .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// File watcher for live reindexing
+// ---------------------------------------------------------------------------
+
+fn start_watcher(
+    root: PathBuf,
+    config: ArcanaConfig,
+    vault: Arc<tokio::sync::Mutex<Vault>>,
+) -> Option<WatchHandle> {
+    let watcher = VaultWatcher::new(root, config);
+    match watcher.start() {
+        Ok(handle) => {
+            // The WatchHandle owns the mpsc::Receiver. We need to move it into
+            // the async task but also return it (so it doesn't get dropped, which
+            // would stop the watcher thread). Instead, we'll use a shared approach:
+            // spawn a blocking task that reads from the sync channel and forwards
+            // paths to an async channel.
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<PathBuf>>();
+
+            // Blocking thread: drain events from the sync channel, batch, and forward
+            let drain_handle = handle.rx.try_recv(); // just to check type
+            drop(drain_handle);
+
+            // We can't move handle.rx out, so we spawn a thread that periodically
+            // drains the handle and sends batches.
+            std::thread::spawn({
+                // We need the handle to live here so the watcher thread stays alive
+                move || {
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        let paths = handle.drain_paths();
+                        if !paths.is_empty() && tx.send(paths).is_err() {
+                            break; // receiver dropped, shut down
+                        }
+                    }
+                }
+            });
+
+            // Async task: receive batched paths and reindex
+            tokio::spawn(async move {
+                while let Some(paths) = rx.recv().await {
+                    let vault = vault.lock().await;
+                    match vault.reindex_paths(&paths) {
+                        Ok(stats) => {
+                            if stats.notes_added > 0
+                                || stats.notes_updated > 0
+                                || stats.notes_removed > 0
+                            {
+                                info!(
+                                    "watcher reindex: +{} ~{} -{} notes",
+                                    stats.notes_added, stats.notes_updated, stats.notes_removed
+                                );
+                            }
+                        }
+                        Err(e) => warn!("watcher reindex failed: {e}"),
+                    }
+                }
+            });
+
+            // Handle is consumed by the thread, return None since we can't return it
+            None
+        }
+        Err(e) => {
+            warn!("failed to start file watcher: {e}");
+            None
+        }
+    }
 }
