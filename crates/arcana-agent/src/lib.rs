@@ -29,6 +29,7 @@ pub use ingest::{
 pub use pricing::CostEstimate;
 pub use tidy::{
     run_tidy_auto, SourceNote, Tidy, TidyConfig, TidyDone, TidyEvent, TidyPlan, TidyPlanned,
+    Unsurveyed, VaultSurveyed,
 };
 pub use tools::{SessionContext, VaultToolExecutor};
 pub use types::{ContentBlock, LlmResponse, Message, StopReason, ToolDef, Usage};

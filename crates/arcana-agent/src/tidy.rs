@@ -99,6 +99,14 @@ pub enum TidyAction {
         summary: String,
         rewrite: bool,
     },
+    /// Merge multiple source notes into one destination (needs LLM).
+    /// Created by post-processing when a Move's destination already has content.
+    Merge {
+        sources: Vec<String>,
+        to: String,
+        title: String,
+        summary: String,
+    },
     /// Split a note into multiple new notes.
     Split {
         from: String,
@@ -122,7 +130,9 @@ impl TidyPlan {
         let mut paths = Vec::new();
         for action in &self.actions {
             match action {
-                TidyAction::Move { to, .. } => paths.push(to.as_str()),
+                TidyAction::Move { to, .. } | TidyAction::Merge { to, .. } => {
+                    paths.push(to.as_str())
+                }
                 TidyAction::Split { notes, .. } => {
                     for n in notes {
                         paths.push(n.path.as_str());
@@ -143,14 +153,20 @@ impl TidyPlan {
 
     /// Source paths involved in the plan.
     pub fn source_paths(&self) -> Vec<&str> {
-        self.actions
-            .iter()
-            .map(|a| match a {
-                TidyAction::Move { from, .. } => from.as_str(),
-                TidyAction::Split { from, .. } => from.as_str(),
-                TidyAction::ExtractConcept { from, .. } => from.as_str(),
-            })
-            .collect()
+        let mut paths = Vec::new();
+        for action in &self.actions {
+            match action {
+                TidyAction::Move { from, .. } => paths.push(from.as_str()),
+                TidyAction::Merge { sources, .. } => {
+                    for s in sources {
+                        paths.push(s.as_str());
+                    }
+                }
+                TidyAction::Split { from, .. } => paths.push(from.as_str()),
+                TidyAction::ExtractConcept { from, .. } => paths.push(from.as_str()),
+            }
+        }
+        paths
     }
 }
 
@@ -163,6 +179,12 @@ pub struct SourceNote {
     pub content: String,
 }
 
+/// Lightweight note summary for vault-wide structural audit (no body content).
+pub struct VaultNoteSummary {
+    pub path: String,
+    pub title: String,
+}
+
 // ---------------------------------------------------------------------------
 // Phase marker types
 // ---------------------------------------------------------------------------
@@ -172,6 +194,11 @@ pub struct Unsurveyed;
 pub struct Surveyed {
     pub sources: Vec<SourceNote>,
     pub vault_context: String,
+}
+
+pub struct VaultSurveyed {
+    pub summaries: Vec<VaultNoteSummary>,
+    pub vault_tree: String,
 }
 
 pub struct TidyPlanned {
@@ -258,6 +285,26 @@ impl Tidy<Unsurveyed> {
             inner: self.inner,
         })
     }
+
+    /// Lightweight vault-wide survey: collect paths and titles only (no bodies).
+    pub async fn survey_vault(self) -> Result<Tidy<VaultSurveyed>> {
+        let (summaries, vault_tree) = {
+            let v = self.inner.vault.lock().await;
+            run_vault_survey(&v, self.inner.event_tx.as_ref())?
+        };
+
+        if summaries.is_empty() {
+            return Err(AgentError::Config("vault has no notes to audit".into()));
+        }
+
+        Ok(Tidy {
+            phase: VaultSurveyed {
+                summaries,
+                vault_tree,
+            },
+            inner: self.inner,
+        })
+    }
 }
 
 impl Tidy<Surveyed> {
@@ -295,6 +342,45 @@ impl Tidy<Surveyed> {
     }
 }
 
+impl Tidy<VaultSurveyed> {
+    pub fn summaries(&self) -> &[VaultNoteSummary] {
+        &self.phase.summaries
+    }
+
+    pub async fn plan(self) -> Result<Tidy<TidyPlanned>> {
+        let (mut plan, plan_usage) = run_plan_vault(
+            self.inner.llm.as_ref(),
+            &self.phase.summaries,
+            &self.phase.vault_tree,
+            &self.inner.profile,
+            self.inner.event_tx.as_ref(),
+        )
+        .await?;
+
+        // Post-process: detect moves whose destination already exists in the
+        // vault and upgrade them to merges.
+        let existing: std::collections::HashSet<&str> =
+            self.phase.summaries.iter().map(|s| s.path.as_str()).collect();
+        plan = upgrade_moves_to_merges(plan, &existing);
+
+        let estimated_gen = estimate_vault_generation(&plan, &self.phase.summaries);
+
+        // Sources are loaded lazily in the generate phase.
+        let sources = Vec::new();
+
+        Ok(Tidy {
+            phase: TidyPlanned {
+                plan,
+                sources,
+                vault_context: self.phase.vault_tree,
+                usage: plan_usage,
+                estimated_gen,
+            },
+            inner: self.inner,
+        })
+    }
+}
+
 impl Tidy<TidyPlanned> {
     pub fn plan(&self) -> &TidyPlan {
         &self.phase.plan
@@ -319,7 +405,28 @@ impl Tidy<TidyPlanned> {
         self
     }
 
-    pub async fn generate(self) -> Result<Tidy<TidyDone>> {
+    pub async fn generate(mut self) -> Result<Tidy<TidyDone>> {
+        // In vault mode, sources are empty — load them lazily from the plan.
+        if self.phase.sources.is_empty() {
+            let v = self.inner.vault.lock().await;
+            for path in self.phase.plan.source_paths() {
+                match v.read_note(path) {
+                    Ok(note) => self.phase.sources.push(SourceNote {
+                        path: path.to_string(),
+                        content: note.body.clone(),
+                    }),
+                    Err(e) => {
+                        send_event(
+                            self.inner.event_tx.as_ref(),
+                            TidyEvent::Error {
+                                message: format!("could not read {path}: {e}"),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
         let input_hash = hash_sources(&self.phase.sources);
         let gen_tasks = generation_tasks(&self.phase.plan, &self.phase.sources);
         let target_desc: Vec<&str> = self.phase.sources.iter().map(|s| s.path.as_str()).collect();
@@ -552,6 +659,227 @@ fn run_survey(
 }
 
 // ---------------------------------------------------------------------------
+// Vault survey (private) — lightweight, paths + titles only
+// ---------------------------------------------------------------------------
+
+fn run_vault_survey(
+    vault: &Vault,
+    event_tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
+) -> Result<(Vec<VaultNoteSummary>, String)> {
+    use arcana_core::SearchFilters;
+
+    let all = vault
+        .list(&SearchFilters::default(), 5000)
+        .map_err(AgentError::Vault)?;
+
+    send_event(
+        event_tx,
+        TidyEvent::SurveyStart { count: all.len() },
+    );
+
+    let summaries: Vec<VaultNoteSummary> = all
+        .into_iter()
+        .map(|r| VaultNoteSummary {
+            title: r.title.unwrap_or_default(),
+            path: r.path,
+        })
+        .collect();
+
+    let vault_tree = vault.vault_tree().map_err(AgentError::Vault)?;
+
+    Ok((summaries, vault_tree))
+}
+
+// ---------------------------------------------------------------------------
+// Vault plan (private) — structural audit, moves only
+// ---------------------------------------------------------------------------
+
+const VAULT_PLAN_TASK: &str = r#"You are auditing the structure of a knowledge vault against its taxonomy.
+
+## Your job
+
+Look at every note path and title below. Find notes that are misplaced — in the
+wrong zone, at the root level instead of a zone, duplicated across locations, or
+in a zone that doesn't exist in the taxonomy.
+
+## Rules
+
+1. Only propose **moves** (no splits, no concept extractions, no rewrites).
+2. Set `"rewrite": false` on every action — the content stays unchanged, just the path changes.
+3. Route notes to the correct zone per the taxonomy. Root-level notes/dirs that
+   clearly belong in an existing zone should be moved there.
+4. If a note is already in the right place, do NOT include it.
+5. When two zones overlap (e.g. a project note that's also a general concept),
+   prefer the more specific location (project > notes).
+6. Preserve subfolder structure where it makes sense (e.g. `electronics/basics/x.md`
+   → `notes/electronics/basics/x.md`).
+7. Keep filenames the same unless they conflict.
+
+## Output format
+
+Respond with ONLY a JSON object (no markdown fences, no explanation):
+
+{
+  "actions": [
+    {
+      "type": "move",
+      "from": "misplaced/note.md",
+      "to": "notes/correct-zone/note.md",
+      "title": "Note Title",
+      "summary": "Why this move is correct",
+      "rewrite": false
+    }
+  ]
+}
+
+If everything is already in the right place, return: {"actions": []}"#;
+
+/// Post-process a plan: if multiple moves target the same destination, or a
+/// move targets a path that already exists in the vault, upgrade to a Merge.
+fn upgrade_moves_to_merges(
+    plan: TidyPlan,
+    existing_paths: &std::collections::HashSet<&str>,
+) -> TidyPlan {
+    use std::collections::HashMap;
+
+    // Group moves by destination path.
+    let mut by_dest: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
+    let mut other_actions: Vec<TidyAction> = Vec::new();
+
+    for action in plan.actions {
+        match action {
+            TidyAction::Move {
+                from, to, title, summary, ..
+            } => {
+                by_dest
+                    .entry(to.clone())
+                    .or_default()
+                    .push((from, title, summary));
+            }
+            other => other_actions.push(other),
+        }
+    }
+
+    let mut actions = other_actions;
+
+    for (to, moves) in by_dest {
+        // Destination already has content in vault — include it as a source.
+        let dest_exists = existing_paths.contains(to.as_str());
+
+        if moves.len() == 1 && !dest_exists {
+            // Simple move, no collision.
+            let (from, title, summary) = moves.into_iter().next().unwrap();
+            actions.push(TidyAction::Move {
+                from,
+                to,
+                title,
+                summary,
+                rewrite: false,
+            });
+        } else {
+            // Multiple sources targeting the same dest, or dest already exists.
+            let mut sources: Vec<String> = moves.iter().map(|(f, _, _)| f.clone()).collect();
+            if dest_exists {
+                sources.push(to.clone());
+            }
+            let title = moves[0].1.clone();
+            let summary = if moves.len() > 1 || dest_exists {
+                format!(
+                    "Merge {} sources into {}",
+                    sources.len(),
+                    to
+                )
+            } else {
+                moves[0].2.clone()
+            };
+            actions.push(TidyAction::Merge {
+                sources,
+                to,
+                title,
+                summary,
+            });
+        }
+    }
+
+    TidyPlan { actions }
+}
+
+async fn run_plan_vault(
+    llm: &dyn LlmBackend,
+    summaries: &[VaultNoteSummary],
+    vault_tree: &str,
+    profile: &BrainProfile,
+    event_tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
+) -> Result<(TidyPlan, Usage)> {
+    send_event(event_tx, TidyEvent::PlanStart);
+
+    let mut user_msg = String::from("<vault_notes>\n");
+    for s in summaries {
+        user_msg.push_str(&format!("- {} — {}\n", s.path, s.title));
+    }
+    user_msg.push_str("</vault_notes>\n\n");
+    user_msg.push_str("<vault_tree>\n");
+    user_msg.push_str(vault_tree);
+    user_msg.push_str("</vault_tree>");
+
+    let system = build_system_prompt(
+        profile.taxonomy(),
+        profile.style(),
+        None,
+        VAULT_PLAN_TASK,
+        None,
+    );
+
+    let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
+
+    let text = response.text();
+    debug!("vault plan response: {}", &text[..text.len().min(500)]);
+
+    let json_str = extract_json(&text);
+    let plan: TidyPlan = serde_json::from_str(json_str).map_err(|e| {
+        AgentError::Llm(format!(
+            "failed to parse vault plan JSON: {e}\n\nraw response:\n{text}"
+        ))
+    })?;
+
+    info!(
+        "vault plan: {} actions, {} moves",
+        plan.actions.len(),
+        plan.output_count()
+    );
+
+    send_event(event_tx, TidyEvent::PlanReady { plan: plan.clone() });
+
+    Ok((plan, response.usage))
+}
+
+fn estimate_vault_generation(plan: &TidyPlan, _summaries: &[VaultNoteSummary]) -> Usage {
+    // Only count actions that actually need LLM generation.
+    let mut input_tokens = 0u64;
+    let mut output_tokens = 0u64;
+    for action in &plan.actions {
+        match action {
+            TidyAction::Move { rewrite: false, .. } => {} // free copy
+            TidyAction::Move { rewrite: true, .. } => {
+                input_tokens += 1000;
+                output_tokens += 500;
+            }
+            TidyAction::Merge { sources, .. } => {
+                // Merges send all source bodies to LLM — estimate per source.
+                let n = sources.len() as u64;
+                input_tokens += n * 1500; // system + all source bodies
+                output_tokens += 1500;    // merged output
+            }
+            TidyAction::Split { .. } | TidyAction::ExtractConcept { .. } => {
+                input_tokens += 1000;
+                output_tokens += 500;
+            }
+        }
+    }
+    Usage { input_tokens, output_tokens }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 2: Plan (private)
 // ---------------------------------------------------------------------------
 
@@ -706,6 +1034,10 @@ struct GenerationTask {
     source_content: String,
     /// Source path (for provenance).
     source_path: String,
+    /// Whether to rewrite content via LLM. When false, source content is copied as-is.
+    rewrite: bool,
+    /// For moves: source path to delete on approve. None for splits/extracts.
+    move_source: Option<String>,
 }
 
 fn generation_tasks(plan: &TidyPlan, sources: &[SourceNote]) -> Vec<GenerationTask> {
@@ -726,7 +1058,7 @@ fn generation_tasks(plan: &TidyPlan, sources: &[SourceNote]) -> Vec<GenerationTa
                 to,
                 title,
                 summary,
-                ..
+                rewrite,
             } => {
                 tasks.push(GenerationTask {
                     output_path: to.clone(),
@@ -734,6 +1066,8 @@ fn generation_tasks(plan: &TidyPlan, sources: &[SourceNote]) -> Vec<GenerationTa
                     summary: summary.clone(),
                     source_content: find_source(from),
                     source_path: from.clone(),
+                    rewrite: *rewrite,
+                    move_source: Some(from.clone()),
                 });
             }
             TidyAction::Split { from, notes } => {
@@ -745,8 +1079,46 @@ fn generation_tasks(plan: &TidyPlan, sources: &[SourceNote]) -> Vec<GenerationTa
                         summary: note.summary.clone(),
                         source_content: source.clone(),
                         source_path: from.clone(),
+                        rewrite: true,
+                        move_source: None, // splits don't delete source (multiple outputs)
                     });
                 }
+            }
+            TidyAction::Merge {
+                sources,
+                to,
+                title,
+                summary,
+            } => {
+                let combined: String = sources
+                    .iter()
+                    .map(|s| {
+                        format!(
+                            "<source path=\"{s}\">\n{}\n</source>\n",
+                            find_source(s)
+                        )
+                    })
+                    .collect();
+                let source_path = sources.first().cloned().unwrap_or_default();
+                // For merges, delete sources that differ from the destination.
+                // Sources matching `to` are the existing dest note — don't delete that.
+                let merge_sources: Vec<String> = sources
+                    .iter()
+                    .filter(|s| s.as_str() != to.as_str())
+                    .cloned()
+                    .collect();
+                tasks.push(GenerationTask {
+                    output_path: to.clone(),
+                    title: title.clone(),
+                    summary: summary.clone(),
+                    source_content: combined,
+                    source_path,
+                    rewrite: true,
+                    // Store first non-dest source; approve handles one source per draft.
+                    // For multiple sources, we'd need multiple original_paths — for now
+                    // the most common case is one misplaced note merging into an existing one.
+                    move_source: merge_sources.into_iter().next(),
+                });
             }
             TidyAction::ExtractConcept { from, concept } => {
                 tasks.push(GenerationTask {
@@ -755,6 +1127,8 @@ fn generation_tasks(plan: &TidyPlan, sources: &[SourceNote]) -> Vec<GenerationTa
                     summary: concept.summary.clone(),
                     source_content: find_source(from),
                     source_path: from.clone(),
+                    rewrite: true,
+                    move_source: None, // extracts don't delete source
                 });
             }
         }
@@ -803,70 +1177,81 @@ async fn run_generate(
             },
         );
 
-        let user_msg = format!(
-            "<assignment>\n\
-             Write a note at: {path}\n\
-             Title: {title}\n\
-             Description: {summary}\n\
-             </assignment>\n\n\
-             <source_material path=\"{source}\">\n\
-             {content}\n\
-             </source_material>",
-            path = task.output_path,
-            title = task.title,
-            summary = task.summary,
-            source = task.source_path,
-            content = task.source_content,
-        );
+        // Fast path: rewrite=false means copy source content as-is (no LLM call).
+        let content = if !task.rewrite {
+            task.source_content.clone()
+        } else {
+            let user_msg = format!(
+                "<assignment>\n\
+                 Write a note at: {path}\n\
+                 Title: {title}\n\
+                 Description: {summary}\n\
+                 </assignment>\n\n\
+                 <source_material path=\"{source}\">\n\
+                 {content}\n\
+                 </source_material>",
+                path = task.output_path,
+                title = task.title,
+                summary = task.summary,
+                source = task.source_path,
+                content = task.source_content,
+            );
 
-        let system = build_system_prompt(
-            profile.taxonomy(),
-            profile.style(),
-            domain_skill,
-            GENERATE_TASK,
-            if vault_context.is_empty() {
-                None
-            } else {
-                Some(vault_context)
-            },
-        );
+            let system = build_system_prompt(
+                profile.taxonomy(),
+                profile.style(),
+                domain_skill,
+                GENERATE_TASK,
+                if vault_context.is_empty() {
+                    None
+                } else {
+                    Some(vault_context)
+                },
+            );
 
-        let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
-        total_usage.accumulate(&response.usage);
+            let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
+            total_usage.accumulate(&response.usage);
 
-        let raw = response.text();
+            let raw = response.text();
 
-        // Parse LLM output and inject AI provenance
-        let content = match arcana_core::Note::parse(
-            std::path::PathBuf::from(&task.output_path),
-            &raw,
-            arcana_core::FileMeta {
-                size_bytes: 0,
-                modified_on_disk: std::time::SystemTime::now(),
-                content_hash: 0,
-            },
-        ) {
-            Ok(mut note) => {
-                note.frontmatter.ai = Some(arcana_core::AiMeta {
-                    model: llm.model_name().to_string(),
-                    provider: llm.provider_name().to_string(),
-                    agent_session: session_id.to_string(),
-                    task: format!("tidy: {}", task.summary),
-                    prompt: String::new(),
-                    sources: vec![task.source_path.clone()],
-                    confidence: arcana_core::Confidence::Medium,
-                    reviewed: false,
-                    generated_at: chrono::Utc::now(),
-                });
-                note.to_string()
+            // Parse LLM output and inject AI provenance
+            match arcana_core::Note::parse(
+                std::path::PathBuf::from(&task.output_path),
+                &raw,
+                arcana_core::FileMeta {
+                    size_bytes: 0,
+                    modified_on_disk: std::time::SystemTime::now(),
+                    content_hash: 0,
+                },
+            ) {
+                Ok(mut note) => {
+                    note.frontmatter.ai = Some(arcana_core::AiMeta {
+                        model: llm.model_name().to_string(),
+                        provider: llm.provider_name().to_string(),
+                        agent_session: session_id.to_string(),
+                        task: format!("tidy: {}", task.summary),
+                        prompt: String::new(),
+                        sources: vec![task.source_path.clone()],
+                        confidence: arcana_core::Confidence::Medium,
+                        reviewed: false,
+                        generated_at: chrono::Utc::now(),
+                    });
+                    note.to_string()
+                }
+                Err(_) => raw, // fallback to raw if parsing fails
             }
-            Err(_) => raw, // fallback to raw if parsing fails
         };
 
-        // Create draft
-        drafts
-            .create_draft(session_id, &task.output_path, &content)
-            .map_err(AgentError::Vault)?;
+        // Create draft — use move draft when there's a source to delete on approve
+        if let Some(ref source) = task.move_source {
+            drafts
+                .create_move_draft(session_id, &task.output_path, &content, source)
+                .map_err(AgentError::Vault)?;
+        } else {
+            drafts
+                .create_draft(session_id, &task.output_path, &content)
+                .map_err(AgentError::Vault)?;
+        }
 
         drafted_paths.push(task.output_path.clone());
 
@@ -1162,5 +1547,95 @@ mod tests {
             .iter()
             .any(|e| matches!(e, TidyEvent::GenerateStart { .. })));
         assert!(events.iter().any(|e| matches!(e, TidyEvent::Done { .. })));
+    }
+
+    #[test]
+    fn upgrade_no_collision_stays_move() {
+        let plan = TidyPlan {
+            actions: vec![TidyAction::Move {
+                from: "clasp/note.md".into(),
+                to: "projects/clasp/note.md".into(),
+                title: "Note".into(),
+                summary: "move it".into(),
+                rewrite: false,
+            }],
+        };
+        let existing: std::collections::HashSet<&str> =
+            ["projects/clasp/other.md"].into_iter().collect();
+        let result = upgrade_moves_to_merges(plan, &existing);
+        assert_eq!(result.actions.len(), 1);
+        assert!(matches!(result.actions[0], TidyAction::Move { .. }));
+    }
+
+    #[test]
+    fn upgrade_dest_exists_becomes_merge() {
+        let plan = TidyPlan {
+            actions: vec![TidyAction::Move {
+                from: "clasp/note.md".into(),
+                to: "projects/clasp/note.md".into(),
+                title: "Note".into(),
+                summary: "move it".into(),
+                rewrite: false,
+            }],
+        };
+        let existing: std::collections::HashSet<&str> =
+            ["projects/clasp/note.md"].into_iter().collect();
+        let result = upgrade_moves_to_merges(plan, &existing);
+        assert_eq!(result.actions.len(), 1);
+        match &result.actions[0] {
+            TidyAction::Merge { sources, to, .. } => {
+                assert_eq!(sources, &["clasp/note.md", "projects/clasp/note.md"]);
+                assert_eq!(to, "projects/clasp/note.md");
+            }
+            other => panic!("expected Merge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upgrade_multiple_moves_same_dest_becomes_merge() {
+        let plan = TidyPlan {
+            actions: vec![
+                TidyAction::Move {
+                    from: "a/note.md".into(),
+                    to: "notes/note.md".into(),
+                    title: "Note".into(),
+                    summary: "a".into(),
+                    rewrite: false,
+                },
+                TidyAction::Move {
+                    from: "b/note.md".into(),
+                    to: "notes/note.md".into(),
+                    title: "Note".into(),
+                    summary: "b".into(),
+                    rewrite: false,
+                },
+            ],
+        };
+        let existing: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let result = upgrade_moves_to_merges(plan, &existing);
+        assert_eq!(result.actions.len(), 1);
+        match &result.actions[0] {
+            TidyAction::Merge { sources, .. } => {
+                assert_eq!(sources.len(), 2);
+            }
+            other => panic!("expected Merge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_tidy_plan_merge() {
+        let json = r#"{
+            "actions": [{
+                "type": "merge",
+                "sources": ["a/note.md", "b/note.md"],
+                "to": "notes/note.md",
+                "title": "Note",
+                "summary": "Merged"
+            }]
+        }"#;
+        let plan: TidyPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(plan.actions.len(), 1);
+        assert_eq!(plan.output_count(), 1);
+        assert_eq!(plan.source_paths(), vec!["a/note.md", "b/note.md"]);
     }
 }

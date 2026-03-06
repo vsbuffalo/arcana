@@ -17,20 +17,32 @@ notes already in your vault. It reads messy or misplaced notes, proposes a
 reorganization plan (moves, splits, concept extractions), and generates
 rewritten drafts that fit your vault's taxonomy.
 
-Tidy requires a target — a path, file, or tag filter — to prevent
-accidentally reorganizing your entire vault in one expensive operation.
+TARGETED MODE (default):
+  Requires a target — a path, file, or tag filter. Reads full note content,
+  can rewrite, split, and extract concepts. More expensive but thorough.
+
+AUDIT MODE (--audit):
+  Audits the entire vault structure against the taxonomy. Only proposes
+  moves — no rewrites, splits, or extractions. Cheap and fast because it
+  sends only paths and titles to the LLM, not full note bodies. Use this
+  to find misplaced notes (wrong zone, root-level orphans, etc.).
 
 Examples:
   arcana tidy inbox/              tidy all notes in inbox/
   arcana tidy inbox/brain-dump.md tidy a single note
   arcana tidy --tags unprocessed  tidy all notes tagged #unprocessed
   arcana tidy notes/ --tags draft tidy drafts under notes/
+  arcana tidy --audit             audit entire vault structure
 
 All output lands in .arcana/drafts/ — use 'arcana review' to approve."
 )]
 pub struct TidyArgs {
     /// Path or file to tidy (e.g. "inbox/", "inbox/dump.md")
     pub target: Option<String>,
+
+    /// Audit entire vault structure against taxonomy (moves only, no rewrites)
+    #[arg(long)]
+    pub audit: bool,
 
     /// Run all phases without prompting
     #[arg(long)]
@@ -50,6 +62,13 @@ pub struct TidyArgs {
 }
 
 pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -> Result<()> {
+    if args.audit {
+        if args.target.is_some() || !args.tags.is_empty() {
+            anyhow::bail!("--audit audits the entire vault; do not combine with a target or --tags");
+        }
+        return run_tidy_vault(args, config, profile);
+    }
+
     let vault = arcana_core::Vault::open(config.clone())?;
     crate::output::print_git_init_info(&vault);
     vault.index()?;
@@ -255,6 +274,182 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
     })
 }
 
+fn run_tidy_vault(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -> Result<()> {
+    let vault = arcana_core::Vault::open(config.clone())?;
+    crate::output::print_git_init_info(&vault);
+    vault.index()?;
+
+    let brain_profile = vault.profile().clone();
+    if brain_profile.taxonomy().is_none() {
+        eprintln!(
+            "{}: --audit requires a taxonomy in .arcana/taxonomy.md",
+            "error".red().bold()
+        );
+        std::process::exit(1);
+    }
+
+    let llm_config = config
+        .resolve_llm(
+            profile.as_deref(),
+            config.agent.tidy.profile.as_deref(),
+            args.provider.as_deref(),
+            args.model.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let backend = arcana_agent::create_backend(&llm_config).map_err(|e| {
+        anyhow::anyhow!(
+            "{e}\n\nhint: set ANTHROPIC_API_KEY, or use --provider ollama --model <name> for local inference"
+        )
+    })?;
+
+    let model_name = backend.model_name().to_string();
+
+    eprintln!(
+        "{} {} ({})",
+        "arcana tidy --audit".bold(),
+        format!("v{}", env!("CARGO_PKG_VERSION")).dimmed(),
+        format!("{}/{}", backend.provider_name(), backend.model_name()).cyan()
+    );
+    eprintln!(
+        "{}",
+        "mode: structural audit (moves only, no rewrites)".dimmed()
+    );
+    eprintln!();
+
+    let rt = tokio::runtime::Runtime::new()?;
+
+    rt.block_on(async {
+        let vault_arc = Arc::new(Mutex::new(vault));
+
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let event_handle = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                handle_event(&event);
+            }
+        });
+
+        let tidy = Tidy::new(backend, vault_arc, brain_profile, None, Some(event_tx));
+
+        let tidy = match tidy.survey_vault().await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}: {e}", "error".red().bold());
+                std::process::exit(1);
+            }
+        };
+
+        eprintln!(
+            "{}",
+            format!("surveyed {} notes", tidy.summaries().len()).dimmed()
+        );
+
+        let mut tidy = match tidy.plan().await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}: {e}", "error".red().bold());
+                std::process::exit(1);
+            }
+        };
+
+        eprintln!("{}", "done".green());
+
+        if tidy.plan().actions.is_empty() {
+            eprintln!(
+                "  {} vault structure matches taxonomy, nothing to move",
+                "→".dimmed()
+            );
+            return Ok(());
+        }
+
+        print_plan(tidy.plan());
+
+        let cost_est = CostEstimate::new(
+            &model_name,
+            tidy.usage().clone(),
+            tidy.estimated_gen().clone(),
+        );
+        print_cost_estimate(&cost_est);
+        eprintln!();
+
+        if !args.auto {
+            loop {
+                eprint!("  {} ", "[g]enerate / [e]dit plan / [q]uit:".bold());
+                std::io::stderr().flush().ok();
+
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_err() {
+                    break;
+                }
+                let choice = input.trim().to_lowercase();
+
+                match choice.as_str() {
+                    "g" | "generate" => break,
+                    "q" | "quit" => {
+                        eprintln!("  {} aborted", "→".dimmed());
+                        return Ok(());
+                    }
+                    "e" | "edit" => match edit_plan(tidy.plan()) {
+                        Ok(edited) => {
+                            tidy = tidy.edit_plan(edited);
+                            if tidy.plan().actions.is_empty() {
+                                eprintln!(
+                                    "  {} plan is empty, nothing to generate",
+                                    "→".dimmed()
+                                );
+                                return Ok(());
+                            }
+                            eprintln!();
+                            print_plan(tidy.plan());
+                            let cost_est = CostEstimate::new(
+                                &model_name,
+                                tidy.usage().clone(),
+                                tidy.estimated_gen().clone(),
+                            );
+                            print_cost_estimate(&cost_est);
+                            eprintln!();
+                        }
+                        Err(e) => {
+                            eprintln!("  {}: {e}", "error".red().bold());
+                        }
+                    },
+                    _ => {
+                        eprintln!("  {} unrecognized choice", "→".dimmed());
+                    }
+                }
+            }
+        }
+
+        let result = tidy.generate().await;
+
+        match result {
+            Ok(done) => {
+                let session_id = done.session_id().unwrap_or("unknown");
+                let drafts_dir = config
+                    .vault
+                    .path
+                    .join(".arcana")
+                    .join("drafts")
+                    .join(session_id);
+                eprintln!("  {}:", "drafts".dimmed());
+                for path in done.drafted() {
+                    eprintln!("    {}", drafts_dir.join(path).display());
+                }
+
+                drop(done);
+                event_handle.await.ok();
+
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("{}: {e}", "error".red().bold());
+                std::process::exit(1);
+            }
+        }
+    })
+}
+
 fn handle_event(event: &TidyEvent) {
     let stderr = std::io::stderr();
     match event {
@@ -412,11 +607,12 @@ fn resolve_targets(vault: &arcana_core::Vault, args: &TidyArgs) -> Result<Vec<St
     // Otherwise, resolve by path/name
     let target = args.target.as_deref().ok_or_else(|| {
         anyhow::anyhow!(
-            "specify a target path or use --tags\n\n\
+            "specify a target path, use --tags, or use --audit for vault-wide structural audit\n\n\
              examples:\n  \
              arcana tidy inbox/\n  \
              arcana tidy inbox/brain-dump.md\n  \
-             arcana tidy --tags unprocessed\n\n\
+             arcana tidy --tags unprocessed\n  \
+             arcana tidy --audit\n\n\
              see 'arcana tidy --help' for more"
         )
     })?;
@@ -549,6 +745,23 @@ fn print_plan(plan: &TidyPlan) {
                 for note in notes {
                     eprintln!("    {} \"{}\"", note.path.cyan(), note.summary.dimmed());
                 }
+            }
+            TidyAction::Merge {
+                sources,
+                to,
+                title,
+                summary,
+            } => {
+                eprintln!(
+                    "  {} {} {}",
+                    "MERGE".yellow().bold(),
+                    "→".dimmed(),
+                    to.cyan()
+                );
+                for src in sources {
+                    eprintln!("    {} {}", "←".dimmed(), src.dimmed());
+                }
+                eprintln!("    {} \"{}\"", title.bold(), summary.dimmed());
             }
             TidyAction::ExtractConcept { from, concept } => {
                 eprintln!(

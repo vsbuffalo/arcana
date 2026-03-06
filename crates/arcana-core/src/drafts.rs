@@ -51,6 +51,8 @@ pub enum DraftKind {
     #[default]
     NewNote,
     SuggestEdit,
+    /// Move/merge: source note(s) should be deleted on approve.
+    Move,
 }
 
 /// Summary info for a session.
@@ -160,6 +162,37 @@ impl DraftManager {
         Ok(())
     }
 
+    /// Create a move/merge draft: on approve, source note is deleted.
+    pub fn create_move_draft(
+        &self,
+        session_id: &str,
+        rel_path: &str,
+        content: &str,
+        source_path: &str,
+    ) -> Result<()> {
+        self.validate_path(rel_path)?;
+        validate_zone(rel_path, &self.zones, &self.projects)?;
+
+        let draft_path = self.draft_file_path(session_id, rel_path);
+        if let Some(parent) = draft_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&draft_path, content)?;
+
+        let mut manifest = self.read_manifest(session_id)?;
+        manifest.drafts.push(DraftEntry {
+            path: rel_path.to_string(),
+            status: DraftStatus::Pending,
+            kind: DraftKind::Move,
+            reason: None,
+            original_path: Some(source_path.to_string()),
+        });
+        self.write_manifest(session_id, &manifest)?;
+
+        debug!("created move draft {source_path} → {rel_path} in session {session_id}");
+        Ok(())
+    }
+
     /// Suggest an edit to an existing vault note.
     pub fn suggest_edit(
         &self,
@@ -260,6 +293,7 @@ impl DraftManager {
 
     /// Approve a draft: move it into the vault.
     /// Returns the vault path where the note was placed.
+    /// For Move drafts, also deletes the source note if it differs from the output.
     /// The caller is responsible for reindexing and git committing.
     pub fn approve(&self, session_id: &str, rel_path: &str) -> Result<PathBuf> {
         let content = self.read_draft(session_id, rel_path)?;
@@ -272,14 +306,36 @@ impl DraftManager {
 
         fs::write(&target, content)?;
 
-        // Update manifest
+        // Update manifest and extract move info before writing
         let mut manifest = self.read_manifest(session_id)?;
+        let mut source_to_delete = None;
         if let Some(entry) = manifest.drafts.iter_mut().find(|d| d.path == rel_path) {
+            // For Move drafts, delete the source note if it differs from the output.
+            if entry.kind == DraftKind::Move {
+                if let Some(ref orig) = entry.original_path {
+                    if orig != rel_path {
+                        source_to_delete = Some(orig.clone());
+                    }
+                }
+            }
             entry.status = DraftStatus::Approved;
         }
         self.write_manifest(session_id, &manifest)?;
 
-        // Remove the draft file (same as reject)
+        // Delete source note for Move drafts
+        if let Some(ref source) = source_to_delete {
+            let source_path = self.vault_root.join(source);
+            if source_path.exists() {
+                fs::remove_file(&source_path)?;
+                // Clean up empty parent directories
+                if let Some(parent) = source_path.parent() {
+                    remove_empty_parents(parent, &self.vault_root);
+                }
+                debug!("deleted source {source} (moved to {rel_path})");
+            }
+        }
+
+        // Remove the draft file
         let draft_path = self.draft_file_path(session_id, rel_path);
         if draft_path.exists() {
             fs::remove_file(draft_path)?;
@@ -404,6 +460,23 @@ impl DraftManager {
             return Err(ArcanaError::PathEscape(rel_path.to_string()));
         }
         Ok(())
+    }
+}
+
+/// Walk up from `dir` toward `stop_at`, removing empty directories.
+fn remove_empty_parents(dir: &Path, stop_at: &Path) {
+    let mut current = dir.to_path_buf();
+    while current.starts_with(stop_at) && current != stop_at {
+        if fs::read_dir(&current).map(|mut d| d.next().is_none()).unwrap_or(false) {
+            if fs::remove_dir(&current).is_err() {
+                break;
+            }
+        } else {
+            break;
+        }
+        if !current.pop() {
+            break;
+        }
     }
 }
 
