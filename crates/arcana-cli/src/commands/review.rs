@@ -21,12 +21,21 @@ pub struct ReviewArgs {
     #[arg(long)]
     pub session: Option<String>,
 
+    /// Run LLM style verification on each draft before review
+    #[arg(long)]
+    pub verify_style: bool,
+
     /// Prune old resolved sessions
     #[arg(long)]
     pub prune: bool,
 }
 
-pub fn run_review(args: ReviewArgs, config: ArcanaConfig, json: bool) -> Result<()> {
+pub fn run_review(
+    args: ReviewArgs,
+    config: ArcanaConfig,
+    json: bool,
+    profile: Option<String>,
+) -> Result<()> {
     let vault = arcana_core::Vault::open(config.clone())?;
     if !json {
         crate::output::print_git_init_info(&vault);
@@ -162,12 +171,52 @@ pub fn run_review(args: ReviewArgs, config: ArcanaConfig, json: bool) -> Result<
         return Ok(());
     }
 
+    // Set up LLM for --verify-style
+    let style_verifier = if args.verify_style {
+        let brain_profile = vault.profile().clone();
+        let style_guide = brain_profile.style().unwrap_or("").to_string();
+        if style_guide.is_empty() {
+            eprintln!(
+                "{}: --verify-style requires a style guide in .arcana/style.md",
+                "warning".yellow().bold()
+            );
+            None
+        } else {
+            let llm_config = config
+                .resolve_llm(profile.as_deref(), None, None, None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            match arcana_agent::create_backend(&llm_config) {
+                Ok(backend) => {
+                    eprintln!(
+                        "{} ({}/{})",
+                        "style verification enabled".dimmed(),
+                        backend.provider_name(),
+                        backend.model_name()
+                    );
+                    eprintln!();
+                    Some((backend, style_guide))
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{}: could not create LLM backend for style verification: {e}",
+                        "warning".yellow().bold()
+                    );
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+
     eprintln!(
         "{} pending drafts in session {}",
         pending.len().to_string().bold(),
         session_id.cyan()
     );
     eprintln!();
+
+    let rt = tokio::runtime::Runtime::new()?;
 
     for (i, draft) in pending.iter().enumerate() {
         let content = drafts.read_draft(session_id, &draft.path)?;
@@ -193,6 +242,37 @@ pub fn run_review(args: ReviewArgs, config: ArcanaConfig, json: bool) -> Result<
         eprintln!("{teaser}");
         if line_count > 5 {
             eprintln!("  {}", "...".dimmed());
+        }
+
+        // Heuristic checks
+        let warnings = heuristic_checks(&draft.path, &content);
+        if !warnings.is_empty() {
+            eprintln!();
+            for w in &warnings {
+                eprintln!("  {} {}", "⚠".yellow(), w.yellow());
+            }
+        }
+
+        // LLM style verification
+        if let Some((ref backend, ref style_guide)) = style_verifier {
+            eprint!("  {} ", "verifying style...".dimmed());
+            std::io::stderr().flush().ok();
+            match rt.block_on(verify_style(backend.as_ref(), style_guide, &content)) {
+                Ok(feedback) if feedback.is_empty() => {
+                    eprintln!("{}", "✓ passes style guide".green());
+                }
+                Ok(feedback) => {
+                    eprintln!();
+                    for line in feedback.lines() {
+                        if !line.trim().is_empty() {
+                            eprintln!("  {} {}", "⚠".yellow(), line.yellow());
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("{}: {e}", "error".red());
+                }
+            }
         }
 
         let mut done = false;
@@ -349,6 +429,74 @@ fn view_in_pager(content: &str) -> Result<()> {
     }
     child.wait()?;
     Ok(())
+}
+
+async fn verify_style(
+    llm: &dyn arcana_agent::LlmBackend,
+    style_guide: &str,
+    content: &str,
+) -> Result<String> {
+    let system = format!(
+        "You are a style guide reviewer. Check the note below against the style guide.\n\n\
+         If the note conforms, respond with exactly: PASS\n\n\
+         If there are issues, list them as brief bullet points (max 5). \
+         Focus only on style guide violations, not content quality.\n\n\
+         <style_guide>\n{style_guide}\n</style_guide>"
+    );
+
+    let msg = arcana_agent::Message::user(format!(
+        "<note>\n{}\n</note>",
+        &content[..content.len().min(8000)]
+    ));
+
+    let response = llm
+        .chat(&system, &[msg], &[])
+        .await
+        .map_err(|e| anyhow::anyhow!("style verification failed: {e}"))?;
+
+    let text = response.text();
+    if text.trim() == "PASS" || text.trim().to_uppercase() == "PASS" {
+        Ok(String::new())
+    } else {
+        Ok(text)
+    }
+}
+
+/// Quick heuristic checks on draft content. Returns a list of warnings.
+fn heuristic_checks(path: &str, content: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Check for frontmatter
+    if !content.starts_with("---\n") {
+        warnings.push("missing YAML frontmatter".into());
+    } else if let Some(end) = content[4..].find("\n---\n") {
+        let fm = &content[4..4 + end];
+        if !fm.contains("title:") {
+            warnings.push("frontmatter missing 'title' field".into());
+        }
+        if !fm.contains("tags:") {
+            warnings.push("frontmatter missing 'tags' field".into());
+        }
+    }
+
+    // Check filename convention: should be lowercase with hyphens
+    let filename = path.rsplit('/').next().unwrap_or(path);
+    if let Some(stem) = filename.strip_suffix(".md") {
+        if stem != stem.to_lowercase() {
+            warnings.push("filename contains uppercase characters".into());
+        }
+        if stem.contains('_') {
+            warnings.push("filename uses underscores (prefer hyphens)".into());
+        }
+    }
+
+    // Very short notes may be stubs
+    let body_lines = content.lines().count();
+    if body_lines < 5 {
+        warnings.push(format!("very short ({body_lines} lines)"));
+    }
+
+    warnings
 }
 
 fn edit_in_editor(path: &std::path::Path) -> Result<bool> {

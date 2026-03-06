@@ -69,7 +69,7 @@ impl Commands {
             Commands::Stats => stats::run_stats(config, json),
             Commands::Serve(args) => serve::run_serve(args, config),
             Commands::Chat(args) => chat::run_chat(args, config, profile),
-            Commands::Review(args) => review::run_review(args, config, json),
+            Commands::Review(args) => review::run_review(args, config, json, profile),
             Commands::Blame(args) => blame::run_blame(args, config, json),
             Commands::Context(args) => context::run_context(args, config),
             Commands::Log(args) => log::run_log(args, config, json),
