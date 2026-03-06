@@ -1,3 +1,4 @@
+pub mod legacy_sse;
 pub mod oauth;
 
 use std::sync::Arc;
@@ -574,6 +575,8 @@ pub async fn serve_sse(
     let config = StreamableHttpServerConfig::default();
     let ct = config.cancellation_token.clone();
 
+    let sse_instructions = instructions.clone();
+
     let service_vault = vault.clone();
     let service = StreamableHttpService::new(
         move || {
@@ -589,13 +592,29 @@ pub async fn serve_sse(
         config,
     );
 
-    let mcp_route = axum::Router::new().route(
-        "/mcp",
-        axum::routing::any(move |req: axum::extract::Request| {
-            let svc = service.clone();
-            async move { svc.handle(req).await }
-        }),
-    );
+    // Legacy SSE state (for Claude Code and other legacy SSE clients).
+    let sse_vault = vault.clone();
+    let legacy_sse_state = legacy_sse::LegacySseState::new(move || {
+        let vault = sse_vault.clone();
+        let instructions = sse_instructions.clone();
+        ArcanaServer {
+            vault,
+            tool_router: ArcanaServer::tool_router(),
+            instructions,
+        }
+    });
+
+    let mcp_route = axum::Router::new()
+        .route(
+            "/mcp",
+            axum::routing::any(move |req: axum::extract::Request| {
+                let svc = service.clone();
+                async move { svc.handle(req).await }
+            }),
+        )
+        .route("/sse", axum::routing::get(legacy_sse::sse_handler))
+        .route("/message", axum::routing::post(legacy_sse::message_handler))
+        .with_state(legacy_sse_state);
 
     let app = if let Some(oauth) = oauth_config {
         info!("OAuth 2.1 auth enabled for SSE transport");
@@ -625,6 +644,7 @@ pub async fn serve_sse(
                 axum::routing::get(oauth::authorize_form).post(oauth::authorize_submit),
             )
             .route("/token", axum::routing::post(oauth::token))
+            .route("/register", axum::routing::post(oauth::register))
             .with_state(oauth_state);
 
         mcp_route.merge(oauth_routes)

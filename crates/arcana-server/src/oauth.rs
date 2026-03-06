@@ -64,6 +64,7 @@ struct AuthServerMetadata {
     issuer: String,
     authorization_endpoint: String,
     token_endpoint: String,
+    registration_endpoint: String,
     response_types_supported: Vec<String>,
     grant_types_supported: Vec<String>,
     code_challenge_methods_supported: Vec<String>,
@@ -77,6 +78,7 @@ pub async fn metadata(headers: axum::http::HeaderMap) -> impl IntoResponse {
         issuer: base.clone(),
         authorization_endpoint: format!("{base}/authorize"),
         token_endpoint: format!("{base}/token"),
+        registration_endpoint: format!("{base}/register"),
         response_types_supported: vec!["code".into()],
         grant_types_supported: vec!["authorization_code".into()],
         code_challenge_methods_supported: vec!["S256".into()],
@@ -97,8 +99,42 @@ pub async fn protected_resource(headers: axum::http::HeaderMap) -> impl IntoResp
     let host = extract_host(&headers);
     let base = base_url(&host);
     axum::Json(ProtectedResourceMetadata {
-        resource: format!("{base}/mcp"),
+        resource: base.clone(),
         authorization_servers: vec![base],
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic client registration (RFC 7591)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct RegisterRequest {
+    #[allow(dead_code)]
+    client_name: Option<String>,
+    #[allow(dead_code)]
+    redirect_uris: Option<Vec<String>>,
+}
+
+#[derive(serde::Serialize)]
+struct RegisterResponse {
+    client_id: String,
+    client_secret: String,
+    client_id_issued_at: u64,
+    client_secret_expires_at: u64,
+    redirect_uris: Vec<String>,
+}
+
+pub async fn register(
+    State(state): State<OAuthState>,
+    axum::Json(body): axum::Json<RegisterRequest>,
+) -> impl IntoResponse {
+    axum::Json(RegisterResponse {
+        client_id: state.config.client_id.clone(),
+        client_secret: state.config.client_secret.clone(),
+        client_id_issued_at: 0,
+        client_secret_expires_at: 0,
+        redirect_uris: body.redirect_uris.unwrap_or_default(),
     })
 }
 
