@@ -11,6 +11,7 @@ use crate::context::generate_context;
 use crate::error::{AgentError, Result};
 use crate::prompt::build_system_prompt;
 use crate::types::{Message, Usage};
+use crate::util::extract_json;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -987,17 +988,6 @@ async fn run_plan_tidy(
     Ok((plan, response.usage))
 }
 
-/// Extract JSON from LLM response, stripping markdown code fences if present.
-pub(crate) fn extract_json(text: &str) -> &str {
-    let trimmed = text.trim();
-    if let Some(start) = trimmed.find('{') {
-        if let Some(end) = trimmed.rfind('}') {
-            return &trimmed[start..=end];
-        }
-    }
-    trimmed
-}
-
 // ---------------------------------------------------------------------------
 // Phase 3: Generate (private)
 // ---------------------------------------------------------------------------
@@ -1015,6 +1005,7 @@ Write the note described below, following the style guide exactly. The note shou
 
 Respond with ONLY the note content in markdown. Start with YAML frontmatter (---), then the body.
 Do not wrap in code fences. Do not add explanations before or after.
+Do NOT include an `ai:` block in the frontmatter — it will be injected automatically.
 
 Example structure:
 ---
@@ -1138,15 +1129,14 @@ fn generation_tasks(plan: &TidyPlan, sources: &[SourceNote]) -> Vec<GenerationTa
 
 /// Compute a stable hash of source notes for deduplication across runs.
 fn hash_sources(sources: &[SourceNote]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
+    let mut combined = String::new();
     for s in sources {
-        s.path.hash(&mut hasher);
-        s.content.hash(&mut hasher);
+        combined.push_str(&s.path);
+        combined.push('\0');
+        combined.push_str(&s.content);
+        combined.push('\0');
     }
-    format!("{:016x}", hasher.finish())
+    format!("{:016x}", xxhash_rust::xxh3::xxh3_64(combined.as_bytes()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1342,23 +1332,6 @@ mod tests {
         let plan: TidyPlan = serde_json::from_str(json).unwrap();
         assert_eq!(plan.output_count(), 1);
         assert_eq!(plan.source_paths(), vec!["inbox/project-work.md"]);
-    }
-
-    #[test]
-    fn extract_json_plain() {
-        assert_eq!(extract_json(r#"{"a": 1}"#), r#"{"a": 1}"#);
-    }
-
-    #[test]
-    fn extract_json_with_fences() {
-        let input = "```json\n{\"a\": 1}\n```";
-        assert_eq!(extract_json(input), r#"{"a": 1}"#);
-    }
-
-    #[test]
-    fn extract_json_with_preamble() {
-        let input = "Here is the plan:\n{\"actions\": []}";
-        assert_eq!(extract_json(input), r#"{"actions": []}"#);
     }
 
     #[tokio::test]

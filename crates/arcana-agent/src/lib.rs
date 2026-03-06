@@ -12,6 +12,7 @@ pub mod prompt;
 pub mod tidy;
 pub mod tools;
 pub mod types;
+pub(crate) mod util;
 
 pub use agent::{AgentConfig, AgentEvent};
 pub use backend::LlmBackend;

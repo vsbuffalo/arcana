@@ -13,9 +13,9 @@ use crate::context::generate_context;
 use crate::error::{AgentError, Result};
 use crate::project_tools::ProjectToolExecutor;
 use crate::prompt::build_system_prompt;
-use crate::tidy::extract_json;
 use crate::tools::VaultToolExecutor;
 use crate::types::{Message, Usage};
+use crate::util::extract_json;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -128,6 +128,7 @@ pub struct Planned {
     pub plan: IngestPlan,
     pub usage: Usage,
     pub estimated_gen: Usage,
+    source_sizes: std::collections::HashMap<String, u64>,
 }
 
 pub struct Done {
@@ -265,13 +266,17 @@ impl Ingest<Explored> {
 
         let mut spent = self.phase.usage;
         spent.accumulate(&plan_usage);
-        let estimated_gen = estimate_generation_usage(&plan);
+
+        // Collect actual source file sizes for better cost estimation
+        let source_sizes = collect_source_sizes(&plan, &self.inner.project);
+        let estimated_gen = estimate_generation_usage(&plan, &source_sizes);
 
         Ok(Ingest {
             phase: Planned {
                 plan,
                 usage: spent,
                 estimated_gen,
+                source_sizes,
             },
             inner: self.inner,
         })
@@ -293,29 +298,12 @@ impl Ingest<Planned> {
 
     /// Replace the plan (Planned → Planned self-transition). Recomputes estimated cost.
     pub fn edit_plan(mut self, new_plan: IngestPlan) -> Self {
-        self.phase.estimated_gen = estimate_generation_usage(&new_plan);
+        self.phase.estimated_gen = estimate_generation_usage(&new_plan, &self.phase.source_sizes);
         self.phase.plan = new_plan;
         self
     }
 
     pub async fn generate(self) -> Result<Ingest<Done>> {
-        // Re-generate vault context for generate phase
-        let vault_context = {
-            let v = self.inner.vault.lock().await;
-            let query = self
-                .phase
-                .plan
-                .notes
-                .first()
-                .map(|n| n.title.clone())
-                .unwrap_or_default();
-            if query.is_empty() {
-                String::new()
-            } else {
-                generate_context(&v, &query, 20)
-            }
-        };
-
         // Compute input hash for dedup
         let input_hash = hash_project(&self.inner.project);
 
@@ -386,7 +374,7 @@ impl Ingest<Planned> {
                 self.inner.llm.as_ref(),
                 &self.phase.plan,
                 &self.inner.project,
-                &vault_context,
+                &v,
                 &self.inner.profile,
                 self.inner.domain_skill.as_deref(),
                 drafts,
@@ -483,12 +471,32 @@ pub async fn run_ingest_auto(
 // Cost estimation helper
 // ---------------------------------------------------------------------------
 
-pub fn estimate_generation_usage(plan: &IngestPlan) -> Usage {
-    let avg_source_tokens: u64 = 4000;
+/// Estimate generation cost. When `source_sizes` is provided (bytes per file),
+/// uses `bytes / 4` for token approximation. Otherwise falls back to a constant.
+pub fn estimate_generation_usage(
+    plan: &IngestPlan,
+    source_sizes: &std::collections::HashMap<String, u64>,
+) -> Usage {
+    const FALLBACK_TOKENS: u64 = 4000;
+    // System prompt + vault context overhead per LLM call
+    const OVERHEAD_TOKENS: u64 = 2000;
+
     let est_input: u64 = plan
         .notes
         .iter()
-        .map(|n| n.source_files.len() as u64 * avg_source_tokens * 2)
+        .map(|n| {
+            let source_tokens: u64 = n
+                .source_files
+                .iter()
+                .map(|f| {
+                    source_sizes
+                        .get(f)
+                        .map(|bytes| bytes / 4)
+                        .unwrap_or(FALLBACK_TOKENS)
+                })
+                .sum();
+            source_tokens + OVERHEAD_TOKENS
+        })
         .sum();
     let est_output: u64 = plan.notes.len() as u64 * 2000;
     Usage {
@@ -578,6 +586,7 @@ Write the note described below, following the style guide exactly. The note shou
 
 Respond with ONLY the note content in markdown. Start with YAML frontmatter (---), then the body.
 Do not wrap in code fences. Do not add explanations before or after.
+Do NOT include an `ai:` block in the frontmatter — it will be injected automatically.
 
 Example structure:
 ---
@@ -837,7 +846,7 @@ async fn run_generate(
     llm: &dyn LlmBackend,
     plan: &IngestPlan,
     project_executor: &ProjectToolExecutor,
-    vault_context: &str,
+    vault: &arcana_core::Vault,
     profile: &BrainProfile,
     domain_skill: Option<&str>,
     drafts: &arcana_core::DraftManager,
@@ -894,16 +903,16 @@ async fn run_generate(
             summary = note.summary,
         );
 
+        // Per-note vault context for better cross-linking accuracy
+        let query = format!("{} {}", note.title, note.summary);
+        let vault_context = generate_context(vault, &query, 20);
+
         let system = build_system_prompt(
             profile.taxonomy(),
             profile.style(),
             domain_skill,
             GENERATE_TASK,
-            if vault_context.is_empty() {
-                None
-            } else {
-                Some(vault_context)
-            },
+            Some(&vault_context),
         );
 
         let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
@@ -965,6 +974,27 @@ async fn run_generate(
 // ---------------------------------------------------------------------------
 // Input hashing
 // ---------------------------------------------------------------------------
+
+/// Query project source file sizes for cost estimation.
+fn collect_source_sizes(
+    plan: &IngestPlan,
+    project: &ProjectToolExecutor,
+) -> std::collections::HashMap<String, u64> {
+    let mut sizes = std::collections::HashMap::new();
+    for note in &plan.notes {
+        for path in &note.source_files {
+            if sizes.contains_key(path) {
+                continue;
+            }
+            if let Ok(content) =
+                project.dispatch("project_read_file", &serde_json::json!({"path": path}))
+            {
+                sizes.insert(path.clone(), content.len() as u64);
+            }
+        }
+    }
+    sizes
+}
 
 /// Compute a stable hash from the project tree output for dedup across runs.
 fn hash_project(project_executor: &ProjectToolExecutor) -> String {

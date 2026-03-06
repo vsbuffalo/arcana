@@ -36,13 +36,18 @@ pub fn generate_context(vault: &Vault, query: &str, limit: usize) -> String {
                     format!(" tags=\"{}\"", note.frontmatter.tags.join(", "))
                 };
 
-                // Truncate body to reasonable size for context (char-boundary safe)
+                // Truncate to paragraph boundary for cleaner context
                 let body = if note.body.len() > 2000 {
                     let mut end = 2000;
                     while !note.body.is_char_boundary(end) {
                         end -= 1;
                     }
-                    format!("{}...", &note.body[..end])
+                    // Prefer cutting at a paragraph boundary
+                    if let Some(para) = note.body[..end].rfind("\n\n") {
+                        format!("{}...", &note.body[..para])
+                    } else {
+                        format!("{}...", &note.body[..end])
+                    }
                 } else {
                     note.body.clone()
                 };

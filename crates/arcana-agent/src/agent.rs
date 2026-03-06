@@ -2,9 +2,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use crate::backend::LlmBackend;
-use crate::error::{AgentError, Result};
+use crate::error::Result;
 use crate::executor::ToolExecutor;
-use crate::types::{ContentBlock, Message, StopReason, Usage};
+use crate::types::{ContentBlock, Message, Role, StopReason, Usage};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -204,16 +204,42 @@ pub async fn agent_loop(
         messages.push(Message::tool_results(results));
     }
 
-    // Exhausted max iterations
+    // Exhausted max iterations — return partial output rather than failing,
+    // since 80% exploration is almost always better than a hard error.
     send_event(event_tx, AgentEvent::MaxIterationsReached);
     warn!(
-        "agent hit max iterations ({}), stopping",
+        "agent hit max iterations ({}), returning partial output",
         config.max_iterations
     );
-    Err(AgentError::Llm(format!(
-        "agent exceeded max iterations ({})",
-        config.max_iterations
-    )))
+
+    // Collect the last assistant text from the conversation
+    let last_text = messages
+        .iter()
+        .rev()
+        .find_map(|m| {
+            if m.role != Role::Assistant {
+                return None;
+            }
+            let text: String = m
+                .content
+                .iter()
+                .filter_map(|b| {
+                    if let ContentBlock::Text { text } = b {
+                        Some(text.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        })
+        .unwrap_or_default();
+
+    Ok((last_text, total_usage))
 }
 
 fn send_event(tx: Option<&mpsc::UnboundedSender<AgentEvent>>, event: AgentEvent) {
