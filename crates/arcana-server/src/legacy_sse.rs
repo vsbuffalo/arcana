@@ -113,7 +113,7 @@ pub async fn sse_handler(
             if trimmed.is_empty() {
                 continue;
             }
-            yield Ok(Event::default().event("message").data(trimmed.to_string()));
+            yield Ok(Event::default().event("message").data(trimmed));
         }
 
         // Clean up when the stream closes.

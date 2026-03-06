@@ -9,9 +9,6 @@ fn setup_vault(tmp: &Path) -> Vault {
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/small_vault");
     copy_dir(&fixture, tmp);
 
-    // Create .obsidian marker so vault detection works
-    std::fs::create_dir_all(tmp.join(".obsidian")).unwrap();
-
     let config = ArcanaConfig::default().with_vault_path(tmp.to_path_buf());
     let vault = Vault::open(config).unwrap();
     vault.index().unwrap();

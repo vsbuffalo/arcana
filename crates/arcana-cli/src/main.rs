@@ -97,8 +97,8 @@ const WORKFLOWS_HELP: &str = "\
     after_long_help = WORKFLOWS_HELP
 )]
 pub struct Cli {
-    /// Path to the vault root directory
-    #[arg(long, global = true, env = "ARCANA_VAULT")]
+    /// Path to the vault root directory (overrides config file)
+    #[arg(long, global = true)]
     vault: Option<PathBuf>,
 
     /// Path to config file
@@ -191,21 +191,31 @@ fn resolve_vault_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
         return Ok(path);
     }
 
-    // 2. ARCANA_VAULT env var (handled by clap env)
-    // If we get here, neither --vault nor env var was set.
-
-    // 3. Walk up from cwd looking for .obsidian/ directory
-    let mut dir = std::env::current_dir()?;
-    loop {
-        if dir.join(".obsidian").is_dir() {
-            return Ok(dir);
-        }
-        if !dir.pop() {
-            break;
+    // 2. vault.path from global config (~/.config/arcana/config.toml)
+    if let Some(global_path) = arcana_core::global_config_path() {
+        if global_path.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&global_path) {
+                if let Ok(config) = toml::from_str::<arcana_core::ArcanaConfig>(&content) {
+                    if !config.vault.path.as_os_str().is_empty() {
+                        let path = config.vault.path;
+                        if path.is_dir() {
+                            return Ok(path);
+                        }
+                    }
+                }
+            }
         }
     }
 
+    let config_path = arcana_core::global_config_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~/.config/arcana/config.toml".to_string());
+
     anyhow::bail!(
-        "could not find vault. Use --vault, set ARCANA_VAULT, or run from within an Obsidian vault"
+        "no vault configured\n\n\
+         Set vault.path in your config:\n\n  \
+         mkdir -p $(dirname {config_path})\n  \
+         echo '[vault]\\npath = \"/path/to/your/vault\"' > {config_path}\n\n\
+         Or pass --vault /path/to/vault"
     )
 }

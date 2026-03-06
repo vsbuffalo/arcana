@@ -4,7 +4,7 @@ Your personal knowledge base as context for AI.
 
 Arcana indexes a folder of markdown notes — your research, references, project docs, ideas — and exposes them to AI assistants via [MCP](https://modelcontextprotocol.io) (Model Context Protocol). Claude, and any MCP-compatible client, can search, read, and write notes in your vault as naturally as browsing the web.
 
-It works especially well with [Obsidian](https://obsidian.md) vaults (auto-detects `.obsidian/`, respects frontmatter and wikilinks), but any directory of markdown files works.
+It works especially well with [Obsidian](https://obsidian.md) vaults (respects frontmatter and wikilinks), but any directory of markdown files works.
 
 ## Why
 
@@ -25,10 +25,17 @@ This puts an `arcana` binary in `~/.cargo/bin/`. First install takes ~15s (compi
 
 ## Quick start
 
-Point Arcana at your notes and index them:
+Configure your vault path:
 
 ```bash
-cd ~/path/to/your/notes   # or Obsidian vault
+mkdir -p ~/.config/arcana
+echo '[vault]
+path = "/path/to/your/notes"' > ~/.config/arcana/config.toml
+```
+
+Then index:
+
+```bash
 arcana index
 ```
 
