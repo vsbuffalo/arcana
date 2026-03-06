@@ -48,6 +48,10 @@ pub struct TidyArgs {
     #[arg(long)]
     pub auto: bool,
 
+    /// Show the system prompts that would be used (for inspection/override)
+    #[arg(long)]
+    pub show_prompt: bool,
+
     /// Filter notes by tag (e.g. --tags unprocessed --tags draft)
     #[arg(long)]
     pub tags: Vec<String>,
@@ -62,6 +66,15 @@ pub struct TidyArgs {
 }
 
 pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -> Result<()> {
+    if args.show_prompt {
+        let vault = arcana_core::Vault::open(config.clone())?;
+        vault.index()?;
+        let brain_profile = vault.profile().clone();
+        let user_prompts = arcana_agent::UserPrompts::load(&config.vault.path);
+        print_tidy_prompts(&brain_profile, &user_prompts);
+        return Ok(());
+    }
+
     if args.audit {
         if args.target.is_some() || !args.tags.is_empty() {
             anyhow::bail!(
@@ -710,6 +723,44 @@ fn print_cost_estimate(est: &CostEstimate) {
                 format!("→  ~${:.2}", total).dimmed()
             );
         }
+    }
+}
+
+fn print_tidy_prompts(
+    profile: &arcana_core::BrainProfile,
+    user_prompts: &arcana_agent::UserPrompts,
+) {
+    let phases = arcana_agent::tidy::default_task_prompts();
+    let overrides: [Option<&str>; 3] = [
+        user_prompts.tidy_audit.as_deref(),
+        user_prompts.tidy_plan.as_deref(),
+        user_prompts.tidy_generate.as_deref(),
+    ];
+
+    for (i, ((phase, filename, default_task), user_override)) in
+        phases.iter().zip(overrides.iter()).enumerate()
+    {
+        if i > 0 {
+            println!();
+        }
+        let task = user_override.unwrap_or(default_task);
+        let source = if user_override.is_some() {
+            format!(".arcana/prompts/{filename}")
+        } else {
+            "built-in".into()
+        };
+        println!("# === {phase} phase (task source: {source}) ===");
+        println!("# To override, save to: .arcana/prompts/{filename}");
+        println!();
+
+        let prompt = arcana_agent::build_system_prompt(
+            profile.taxonomy(),
+            profile.style(),
+            None,
+            task,
+            None,
+        );
+        println!("{prompt}");
     }
 }
 

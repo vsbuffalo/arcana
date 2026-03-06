@@ -21,6 +21,10 @@ pub struct IngestArgs {
     #[arg(long)]
     pub skill: Option<String>,
 
+    /// Show the system prompts that would be used (for inspection/override)
+    #[arg(long)]
+    pub show_prompt: bool,
+
     /// LLM provider override (anthropic, openai, ollama)
     #[arg(long)]
     pub provider: Option<String>,
@@ -34,6 +38,22 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
     let vault = arcana_core::Vault::open(config.clone())?;
     crate::output::print_git_init_info(&vault);
     vault.index()?;
+
+    // Resolve skill if specified
+    let skill = if let Some(ref skill_name) = args.skill {
+        Some(arcana_core::resolve_skill(skill_name, &config.vault.path)?)
+    } else {
+        None
+    };
+    let domain_skill = skill.as_ref().map(|s| s.body.clone());
+
+    let brain_profile = vault.profile().clone();
+    let user_prompts = arcana_agent::UserPrompts::load(&config.vault.path);
+
+    if args.show_prompt {
+        print_ingest_prompts(&brain_profile, domain_skill.as_deref(), &user_prompts);
+        return Ok(());
+    }
 
     // Resolve project path
     let project_path = std::path::PathBuf::from(&args.project);
@@ -61,17 +81,6 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
             "{e}\n\nhint: set ANTHROPIC_API_KEY, or use --provider ollama --model <name> for local inference"
         )
     })?;
-
-    // Resolve skill if specified
-    let skill = if let Some(ref skill_name) = args.skill {
-        Some(arcana_core::resolve_skill(skill_name, &config.vault.path)?)
-    } else {
-        None
-    };
-    let domain_skill = skill.as_ref().map(|s| s.body.clone());
-
-    let brain_profile = vault.profile().clone();
-    let user_prompts = arcana_agent::UserPrompts::load(&config.vault.path);
 
     let project_name = project_path
         .file_name()
@@ -470,6 +479,45 @@ fn print_cost_estimate(est: &CostEstimate) {
                 format!("→  ~${:.2}", total).dimmed()
             );
         }
+    }
+}
+
+fn print_ingest_prompts(
+    profile: &arcana_core::BrainProfile,
+    domain_skill: Option<&str>,
+    user_prompts: &arcana_agent::UserPrompts,
+) {
+    let phases = arcana_agent::ingest::default_task_prompts();
+    let overrides: [Option<&str>; 3] = [
+        user_prompts.explore.as_deref(),
+        user_prompts.ingest_plan.as_deref(),
+        user_prompts.ingest_generate.as_deref(),
+    ];
+
+    for (i, ((phase, filename, default_task), user_override)) in
+        phases.iter().zip(overrides.iter()).enumerate()
+    {
+        if i > 0 {
+            println!();
+        }
+        let task = user_override.unwrap_or(default_task);
+        let source = if user_override.is_some() {
+            format!(".arcana/prompts/{filename}")
+        } else {
+            "built-in".into()
+        };
+        println!("# === {phase} phase (task source: {source}) ===");
+        println!("# To override, save to: .arcana/prompts/{filename}");
+        println!();
+
+        let prompt = arcana_agent::build_system_prompt(
+            profile.taxonomy(),
+            profile.style(),
+            domain_skill,
+            task,
+            None,
+        );
+        println!("{prompt}");
     }
 }
 

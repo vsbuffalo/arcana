@@ -31,6 +31,15 @@ impl Default for TidyConfig {
     }
 }
 
+/// Default task prompts for each tidy phase, for use with `--show-prompt`.
+pub fn default_task_prompts() -> [(&'static str, &'static str, &'static str); 3] {
+    [
+        ("audit", "tidy-audit.md", VAULT_PLAN_TASK),
+        ("plan", "tidy-plan.md", PLAN_TASK),
+        ("generate", "tidy-generate.md", GENERATE_TASK),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------

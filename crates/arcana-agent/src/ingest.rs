@@ -525,6 +525,15 @@ pub fn estimate_generation_usage(
 // Prompts
 // ---------------------------------------------------------------------------
 
+/// Default task prompts for each ingest phase, for use with `--show-prompt`.
+pub fn default_task_prompts() -> [(&'static str, &'static str, &'static str); 3] {
+    [
+        ("explore", "explore.md", EXPLORE_TASK),
+        ("plan", "ingest-plan.md", PLAN_TASK),
+        ("generate", "ingest-generate.md", GENERATE_TASK),
+    ]
+}
+
 const EXPLORE_TASK: &str = r#"You are exploring an external codebase to understand its structure, purpose, and key concepts.
 
 ## Your job

@@ -217,6 +217,11 @@ impl ChatSession {
     }
 }
 
+/// Default task prompt for chat, for use with `--show-prompt`.
+pub fn default_task_prompt() -> (&'static str, &'static str) {
+    ("chat.md", LIBRARIAN_TASK)
+}
+
 const LIBRARIAN_TASK: &str = r#"You are a librarian for this Obsidian knowledge vault.
 
 ## Conversational style
