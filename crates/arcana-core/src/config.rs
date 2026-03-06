@@ -36,7 +36,8 @@ pub fn load_merged(
 
     // Serialize compiled defaults as the base
     let defaults = ArcanaConfig::default();
-    let defaults_str = toml::to_string(&defaults).map_err(|e| ArcanaError::Config(e.to_string()))?;
+    let defaults_str =
+        toml::to_string(&defaults).map_err(|e| ArcanaError::Config(e.to_string()))?;
     let defaults_val: toml::Value =
         toml::from_str(&defaults_str).map_err(|e| ArcanaError::Config(e.to_string()))?;
     if let toml::Value::Table(t) = defaults_val {
@@ -329,9 +330,7 @@ impl ArcanaConfig {
         cli_model: Option<&str>,
     ) -> Result<LlmConfig> {
         // Pick the effective profile name: --profile > op default > default_profile
-        let profile_name = cli_profile
-            .or(op_profile)
-            .unwrap_or(&self.default_profile);
+        let profile_name = cli_profile.or(op_profile).unwrap_or(&self.default_profile);
 
         let mut llm = if let Some(profile) = self.profiles.get(profile_name) {
             profile.clone()
@@ -342,8 +341,7 @@ impl ArcanaConfig {
             // Zero config: no profiles, no [llm] → use compiled defaults
             LlmConfig::default()
         } else {
-            let mut available: Vec<&str> =
-                self.profiles.keys().map(|k| k.as_str()).collect();
+            let mut available: Vec<&str> = self.profiles.keys().map(|k| k.as_str()).collect();
             available.sort();
             return Err(ArcanaError::Config(format!(
                 "profile '{}' not found (available: {})",
@@ -395,10 +393,7 @@ fn dirs_db_path() -> PathBuf {
 }
 
 fn simple_hash(s: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish()
+    xxhash_rust::xxh3::xxh3_64(s.as_bytes())
 }
 
 #[cfg(test)]
@@ -472,10 +467,7 @@ mod tests {
             "anthropic"
         );
         // agent.max_tokens preserved, agent.ingest.max_tokens added
-        assert_eq!(
-            table["agent"]["max_tokens"].as_integer().unwrap(),
-            200000
-        );
+        assert_eq!(table["agent"]["max_tokens"].as_integer().unwrap(), 200000);
         assert_eq!(
             table["agent"]["ingest"]["max_tokens"].as_integer().unwrap(),
             300000
@@ -596,8 +588,10 @@ mod tests {
     }
 
     fn config_with_profiles() -> ArcanaConfig {
-        let mut config = ArcanaConfig::default();
-        config.default_profile = "sonnet".into();
+        let mut config = ArcanaConfig {
+            default_profile: "sonnet".into(),
+            ..Default::default()
+        };
         config.profiles.clear();
         config.profiles.insert(
             "sonnet".into(),
@@ -688,9 +682,7 @@ mod tests {
     #[test]
     fn resolve_llm_op_default_used_when_no_cli_profile() {
         let config = config_with_profiles();
-        let llm = config
-            .resolve_llm(None, Some("opus"), None, None)
-            .unwrap();
+        let llm = config.resolve_llm(None, Some("opus"), None, None).unwrap();
         assert_eq!(llm.model, "claude-opus-4-6-20250918");
     }
 

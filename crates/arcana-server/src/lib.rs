@@ -248,7 +248,7 @@ impl ArcanaServer {
             text: input.query,
             limit: input.limit,
             filters: SearchFilters {
-                tags: input.tags,
+                tag: input.tags.into_iter().next(),
                 path_prefix: input.path_prefix,
                 ..Default::default()
             },
@@ -343,12 +343,10 @@ impl ArcanaServer {
                 note.body.push_str(text);
             }
 
-            // Write full note content directly
-            let full_path = vault.root().join(&input.path);
-            std::fs::write(&full_path, note.to_string()).map_err(|e| {
-                rmcp::ErrorData::internal_error(format!("failed to write note: {e}"), None)
-            })?;
-            vault.reindex_paths(&[full_path]).map_err(vault_err)?;
+            // Write atomically and reindex
+            vault
+                .write_note_content(&input.path, &note.to_string())
+                .map_err(vault_err)?;
         } else {
             // No tag removal needed — use the standard update path
             vault
@@ -374,7 +372,7 @@ impl ArcanaServer {
     ) -> Result<CallToolResult, rmcp::ErrorData> {
         let vault = self.vault.lock().await;
         let filters = SearchFilters {
-            tags: input.tags,
+            tag: input.tags.into_iter().next(),
             path_prefix: input.path_prefix,
             ..Default::default()
         };
@@ -650,15 +648,14 @@ pub async fn serve_sse(
         mcp_route.merge(oauth_routes)
     } else if let Some(token) = bearer_token {
         info!("static bearer token auth enabled for SSE transport");
-        let oauth_state =
-            oauth::OAuthState::new(
-                OAuthConfig {
-                    client_id: String::new(),
-                    client_secret: String::new(),
-                    password: String::new(),
-                },
-                Some(token),
-            );
+        let oauth_state = oauth::OAuthState::new(
+            OAuthConfig {
+                client_id: String::new(),
+                client_secret: String::new(),
+                password: String::new(),
+            },
+            Some(token),
+        );
         mcp_route.layer(axum::middleware::from_fn_with_state(
             oauth_state,
             oauth::bearer_auth,

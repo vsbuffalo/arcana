@@ -14,7 +14,7 @@ pub struct SearchQuery {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchFilters {
-    pub tags: Vec<String>,
+    pub tag: Option<String>,
     pub path_prefix: Option<String>,
     pub ai_only: bool,
 }
@@ -63,11 +63,11 @@ pub fn execute_search(db: &Database, query: &SearchQuery) -> Result<Vec<SearchRe
     }
 
     let limit = query.limit.unwrap_or(20);
-    let has_tag_filter = !query.filters.tags.is_empty();
+    let has_tag_filter = query.filters.tag.is_some();
     let has_path_filter = query.filters.path_prefix.is_some();
 
     if has_tag_filter && has_path_filter {
-        let tag = &query.filters.tags[0];
+        let tag = query.filters.tag.as_ref().unwrap();
         let path_pat = format!("{}%", query.filters.path_prefix.as_ref().unwrap());
         let mut stmt = db.conn.prepare(
             "SELECT n.id, n.path, n.title,
@@ -90,7 +90,7 @@ pub fn execute_search(db: &Database, query: &SearchQuery) -> Result<Vec<SearchRe
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(results)
     } else if has_tag_filter {
-        let tag = &query.filters.tags[0];
+        let tag = query.filters.tag.as_ref().unwrap();
         let mut stmt = db.conn.prepare(
             "SELECT n.id, n.path, n.title,
                     snippet(notes_fts, 1, '<mark>', '</mark>', '...', 32) as snippet,
@@ -124,24 +124,33 @@ pub fn execute_search(db: &Database, query: &SearchQuery) -> Result<Vec<SearchRe
             .query_map(params![sanitized, path_pat, limit as i64], map_search_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(results)
-    } else {
-        let ai_filter = if query.filters.ai_only {
-            " AND n.is_ai = 1"
-        } else {
-            ""
-        };
-        let sql = format!(
+    } else if query.filters.ai_only {
+        let mut stmt = db.conn.prepare(
             "SELECT n.id, n.path, n.title,
                     snippet(notes_fts, 1, '<mark>', '</mark>', '...', 32) as snippet,
                     bm25(notes_fts, 5.0, 1.0, 2.0) as score
              FROM notes_fts
              JOIN notes n ON n.id = notes_fts.rowid
-             WHERE notes_fts MATCH ?1{}
+             WHERE notes_fts MATCH ?1
+               AND n.is_ai = 1
              ORDER BY score
              LIMIT ?2",
-            ai_filter
-        );
-        let mut stmt = db.conn.prepare(&sql)?;
+        )?;
+        let results = stmt
+            .query_map(params![sanitized, limit as i64], map_search_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(results)
+    } else {
+        let mut stmt = db.conn.prepare(
+            "SELECT n.id, n.path, n.title,
+                    snippet(notes_fts, 1, '<mark>', '</mark>', '...', 32) as snippet,
+                    bm25(notes_fts, 5.0, 1.0, 2.0) as score
+             FROM notes_fts
+             JOIN notes n ON n.id = notes_fts.rowid
+             WHERE notes_fts MATCH ?1
+             ORDER BY score
+             LIMIT ?2",
+        )?;
         let results = stmt
             .query_map(params![sanitized, limit as i64], map_search_row)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -164,11 +173,11 @@ pub fn execute_list(
     filters: &SearchFilters,
     limit: usize,
 ) -> Result<Vec<SearchResult>> {
-    let has_tag_filter = !filters.tags.is_empty();
+    let has_tag_filter = filters.tag.is_some();
     let has_path_filter = filters.path_prefix.is_some();
 
     if has_tag_filter {
-        let tag = &filters.tags[0];
+        let tag = filters.tag.as_ref().unwrap();
         let mut stmt = db.conn.prepare(
             "SELECT n.id, n.path, n.title, '' as snippet, 0.0 as score
              FROM notes n

@@ -146,8 +146,8 @@ impl VaultToolExecutor {
     fn update_def() -> ToolDef {
         ToolDef {
             name: "vault_update".into(),
-            description:
-                "Update an existing note. Can replace body, append text, or modify tags.".into(),
+            description: "Update an existing note. Can replace body, append text, or modify tags."
+                .into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -287,7 +287,7 @@ impl VaultToolExecutor {
             text: input.query,
             limit: input.limit,
             filters: SearchFilters {
-                tags: input.tags,
+                tag: input.tags.into_iter().next(),
                 path_prefix: input.path_prefix,
                 ..Default::default()
             },
@@ -393,10 +393,8 @@ impl VaultToolExecutor {
                 note.frontmatter.ai = Some(self.build_ai_meta());
             }
 
-            let full_path = vault.root().join(&input.path);
-            std::fs::write(&full_path, note.to_string()).map_err(|e| e.to_string())?;
             vault
-                .reindex_paths(&[full_path])
+                .write_note_content(&input.path, &note.to_string())
                 .map_err(|e| e.to_string())?;
 
             if let Some(git) = vault.git() {
@@ -436,7 +434,7 @@ impl VaultToolExecutor {
         let input: Input = serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
         let vault = self.vault.lock().await;
         let filters = SearchFilters {
-            tags: input.tags,
+            tag: input.tags.into_iter().next(),
             path_prefix: input.path_prefix,
             ..Default::default()
         };
@@ -564,7 +562,6 @@ impl VaultToolExecutor {
             provider: self.session.provider.clone(),
             agent_session: self.session.session_id.clone(),
             task: self.session.task.clone(),
-            prompt: String::new(),
             sources: Vec::new(),
             confidence: Confidence::Medium,
             reviewed: false,
@@ -650,10 +647,8 @@ mod tests {
                 provider: "test".into(),
             },
         );
-        let executor = PermissionedExecutor::new(
-            inner,
-            Box::new(crate::permissions::chat_permissions),
-        );
+        let executor =
+            PermissionedExecutor::new(inner, Box::new(crate::permissions::chat_permissions));
 
         let result = executor
             .execute(

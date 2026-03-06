@@ -45,7 +45,7 @@ impl Run for SearchArgs {
             text: self.query,
             limit: Some(self.limit),
             filters: SearchFilters {
-                tags: self.tag,
+                tag: self.tag.into_iter().next(),
                 path_prefix: self.path,
                 ai_only: self.ai_only,
             },

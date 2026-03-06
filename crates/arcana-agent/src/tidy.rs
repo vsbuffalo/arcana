@@ -359,8 +359,12 @@ impl Tidy<VaultSurveyed> {
 
         // Post-process: detect moves whose destination already exists in the
         // vault and upgrade them to merges.
-        let existing: std::collections::HashSet<&str> =
-            self.phase.summaries.iter().map(|s| s.path.as_str()).collect();
+        let existing: std::collections::HashSet<&str> = self
+            .phase
+            .summaries
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect();
         plan = upgrade_moves_to_merges(plan, &existing);
 
         let estimated_gen = estimate_vault_generation(&plan, &self.phase.summaries);
@@ -672,10 +676,7 @@ fn run_vault_survey(
         .list(&SearchFilters::default(), 5000)
         .map_err(AgentError::Vault)?;
 
-    send_event(
-        event_tx,
-        TidyEvent::SurveyStart { count: all.len() },
-    );
+    send_event(event_tx, TidyEvent::SurveyStart { count: all.len() });
 
     let summaries: Vec<VaultNoteSummary> = all
         .into_iter()
@@ -749,7 +750,11 @@ fn upgrade_moves_to_merges(
     for action in plan.actions {
         match action {
             TidyAction::Move {
-                from, to, title, summary, ..
+                from,
+                to,
+                title,
+                summary,
+                ..
             } => {
                 by_dest
                     .entry(to.clone())
@@ -784,11 +789,7 @@ fn upgrade_moves_to_merges(
             }
             let title = moves[0].1.clone();
             let summary = if moves.len() > 1 || dest_exists {
-                format!(
-                    "Merge {} sources into {}",
-                    sources.len(),
-                    to
-                )
+                format!("Merge {} sources into {}", sources.len(), to)
             } else {
                 moves[0].2.clone()
             };
@@ -868,7 +869,7 @@ fn estimate_vault_generation(plan: &TidyPlan, _summaries: &[VaultNoteSummary]) -
                 // Merges send all source bodies to LLM — estimate per source.
                 let n = sources.len() as u64;
                 input_tokens += n * 1500; // system + all source bodies
-                output_tokens += 1500;    // merged output
+                output_tokens += 1500; // merged output
             }
             TidyAction::Split { .. } | TidyAction::ExtractConcept { .. } => {
                 input_tokens += 1000;
@@ -876,7 +877,10 @@ fn estimate_vault_generation(plan: &TidyPlan, _summaries: &[VaultNoteSummary]) -
             }
         }
     }
-    Usage { input_tokens, output_tokens }
+    Usage {
+        input_tokens,
+        output_tokens,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,12 +1096,7 @@ fn generation_tasks(plan: &TidyPlan, sources: &[SourceNote]) -> Vec<GenerationTa
             } => {
                 let combined: String = sources
                     .iter()
-                    .map(|s| {
-                        format!(
-                            "<source path=\"{s}\">\n{}\n</source>\n",
-                            find_source(s)
-                        )
-                    })
+                    .map(|s| format!("<source path=\"{s}\">\n{}\n</source>\n", find_source(s)))
                     .collect();
                 let source_path = sources.first().cloned().unwrap_or_default();
                 // For merges, delete sources that differ from the destination.
@@ -1230,7 +1229,6 @@ async fn run_generate(
                         provider: llm.provider_name().to_string(),
                         agent_session: session_id.to_string(),
                         task: format!("tidy: {}", task.summary),
-                        prompt: String::new(),
                         sources: vec![task.source_path.clone()],
                         confidence: arcana_core::Confidence::Medium,
                         reviewed: false,
@@ -1473,10 +1471,7 @@ mod tests {
 
         assert_eq!(result.plan().output_count(), 1);
         assert!(result.session_id().is_some());
-        assert_eq!(
-            result.drafted(),
-            &["concepts/interior-mutability.md"]
-        );
+        assert_eq!(result.drafted(), &["concepts/interior-mutability.md"]);
         assert_eq!(result.usage().input_tokens, 900);
         assert_eq!(result.usage().output_tokens, 300);
     }

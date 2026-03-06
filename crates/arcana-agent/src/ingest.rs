@@ -795,9 +795,7 @@ async fn run_plan(
 ) -> Result<(IngestPlan, Usage)> {
     send_event(event_tx, IngestEvent::PlanStart);
 
-    let user_msg = format!(
-        "<exploration_summary>\n{exploration_summary}\n</exploration_summary>"
-    );
+    let user_msg = format!("<exploration_summary>\n{exploration_summary}\n</exploration_summary>");
 
     let system = build_system_prompt(
         profile.taxonomy(),
@@ -870,10 +868,8 @@ async fn run_generate(
         // Re-read source files for this note
         let mut source_material = String::new();
         for src_path in &note.source_files {
-            let content = project_executor.dispatch(
-                "project_read_file",
-                &serde_json::json!({"path": src_path}),
-            );
+            let content = project_executor
+                .dispatch("project_read_file", &serde_json::json!({"path": src_path}));
             match content {
                 Ok(text) => {
                     source_material.push_str(&format!(
@@ -931,7 +927,6 @@ async fn run_generate(
                     provider: llm.provider_name().to_string(),
                     agent_session: session_id.to_string(),
                     task: format!("ingest: {}", note.summary),
-                    prompt: String::new(),
                     sources: note.source_files.clone(),
                     confidence: arcana_core::Confidence::Medium,
                     reviewed: false,
@@ -973,16 +968,11 @@ async fn run_generate(
 
 /// Compute a stable hash from the project tree output for dedup across runs.
 fn hash_project(project_executor: &ProjectToolExecutor) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let tree = project_executor
         .dispatch("project_tree", &serde_json::json!({"depth": 4}))
         .unwrap_or_default();
 
-    let mut hasher = DefaultHasher::new();
-    tree.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    format!("{:016x}", xxhash_rust::xxh3::xxh3_64(tree.as_bytes()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,10 +1033,7 @@ mod tests {
     #[test]
     fn extract_summary_basic() {
         let text = "I explored the project.\n<summary>\nThis is a Rust CLI tool.\n</summary>\n";
-        assert_eq!(
-            extract_summary(text),
-            Some("This is a Rust CLI tool.")
-        );
+        assert_eq!(extract_summary(text), Some("This is a Rust CLI tool."));
     }
 
     #[test]
@@ -1368,8 +1355,6 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, IngestEvent::GenerateStart { .. })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, IngestEvent::Done { .. })));
+        assert!(events.iter().any(|e| matches!(e, IngestEvent::Done { .. })));
     }
 }

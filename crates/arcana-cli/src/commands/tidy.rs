@@ -64,7 +64,9 @@ pub struct TidyArgs {
 pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -> Result<()> {
     if args.audit {
         if args.target.is_some() || !args.tags.is_empty() {
-            anyhow::bail!("--audit audits the entire vault; do not combine with a target or --tags");
+            anyhow::bail!(
+                "--audit audits the entire vault; do not combine with a target or --tags"
+            );
         }
         return run_tidy_vault(args, config, profile);
     }
@@ -146,13 +148,7 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
         });
 
         // --- Phase 1+2: Survey + Plan ---
-        let tidy = Tidy::new(
-            backend,
-            vault_arc,
-            brain_profile,
-            None,
-            Some(event_tx),
-        );
+        let tidy = Tidy::new(backend, vault_arc, brain_profile, None, Some(event_tx));
 
         let tidy = match tidy.survey(&target_paths).await {
             Ok(r) => r,
@@ -192,10 +188,7 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
         // --- Interactive prompt ---
         if !args.auto {
             loop {
-                eprint!(
-                    "  {} ",
-                    "[g]enerate / [e]dit plan / [q]uit:".bold()
-                );
+                eprint!("  {} ", "[g]enerate / [e]dit plan / [q]uit:".bold());
                 std::io::stderr().flush().ok();
 
                 let mut input = String::new();
@@ -210,32 +203,27 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
                         eprintln!("  {} aborted", "→".dimmed());
                         return Ok(());
                     }
-                    "e" | "edit" => {
-                        match edit_plan(tidy.plan()) {
-                            Ok(edited) => {
-                                tidy = tidy.edit_plan(edited);
-                                if tidy.plan().actions.is_empty() {
-                                    eprintln!(
-                                        "  {} plan is empty, nothing to generate",
-                                        "→".dimmed()
-                                    );
-                                    return Ok(());
-                                }
-                                eprintln!();
-                                print_plan(tidy.plan());
-                                let cost_est = CostEstimate::new(
-                                    &model_name,
-                                    tidy.usage().clone(),
-                                    tidy.estimated_gen().clone(),
-                                );
-                                print_cost_estimate(&cost_est);
-                                eprintln!();
+                    "e" | "edit" => match edit_plan(tidy.plan()) {
+                        Ok(edited) => {
+                            tidy = tidy.edit_plan(edited);
+                            if tidy.plan().actions.is_empty() {
+                                eprintln!("  {} plan is empty, nothing to generate", "→".dimmed());
+                                return Ok(());
                             }
-                            Err(e) => {
-                                eprintln!("  {}: {e}", "error".red().bold());
-                            }
+                            eprintln!();
+                            print_plan(tidy.plan());
+                            let cost_est = CostEstimate::new(
+                                &model_name,
+                                tidy.usage().clone(),
+                                tidy.estimated_gen().clone(),
+                            );
+                            print_cost_estimate(&cost_est);
+                            eprintln!();
                         }
-                    }
+                        Err(e) => {
+                            eprintln!("  {}: {e}", "error".red().bold());
+                        }
+                    },
                     _ => {
                         eprintln!("  {} unrecognized choice", "→".dimmed());
                     }
@@ -394,10 +382,7 @@ fn run_tidy_vault(args: TidyArgs, config: ArcanaConfig, profile: Option<String>)
                         Ok(edited) => {
                             tidy = tidy.edit_plan(edited);
                             if tidy.plan().actions.is_empty() {
-                                eprintln!(
-                                    "  {} plan is empty, nothing to generate",
-                                    "→".dimmed()
-                                );
+                                eprintln!("  {} plan is empty, nothing to generate", "→".dimmed());
                                 return Ok(());
                             }
                             eprintln!();
@@ -505,7 +490,13 @@ fn handle_event(event: &TidyEvent) {
             ..
         } => {
             let mut h = stderr.lock();
-            let _ = write!(h, "\r  generating [{}/{}] {}        ", index + 1, total, path);
+            let _ = write!(
+                h,
+                "\r  generating [{}/{}] {}        ",
+                index + 1,
+                total,
+                path
+            );
             let _ = h.flush();
         }
         TidyEvent::GenerateDone { .. } => {}
@@ -542,18 +533,14 @@ fn handle_event(event: &TidyEvent) {
     }
 }
 
-fn edit_plan(
-    plan: &TidyPlan,
-) -> Result<TidyPlan> {
+fn edit_plan(plan: &TidyPlan) -> Result<TidyPlan> {
     let toml_str = toml::to_string_pretty(plan)?;
 
     let header = "# Edit the tidy plan below.\n\
                   # Remove actions you don't want, adjust paths/titles/summaries.\n\
                   # Save and close the editor to continue.\n\n";
 
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".toml")
-        .tempfile()?;
+    let mut tmp = tempfile::Builder::new().suffix(".toml").tempfile()?;
     tmp.write_all(header.as_bytes())?;
     tmp.write_all(toml_str.as_bytes())?;
     tmp.flush()?;
@@ -596,7 +583,7 @@ fn resolve_targets(vault: &arcana_core::Vault, args: &TidyArgs) -> Result<Vec<St
     // If tags are specified, search by tags
     if !args.tags.is_empty() {
         let filters = SearchFilters {
-            tags: args.tags.clone(),
+            tag: args.tags.first().cloned(),
             path_prefix: args.target.clone(),
             ..Default::default()
         };

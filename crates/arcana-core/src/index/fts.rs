@@ -125,19 +125,26 @@ impl Database {
             return Ok(removed);
         }
 
-        // Build placeholders
-        let placeholders: Vec<&str> = current_paths.iter().map(|_| "?").collect();
-        let sql = format!(
-            "DELETE FROM notes WHERE path NOT IN ({})",
-            placeholders.join(",")
-        );
+        // Use a temp table to avoid exceeding SQLite's 999 variable limit
+        self.conn
+            .execute_batch("CREATE TEMP TABLE IF NOT EXISTS _keep_paths (path TEXT PRIMARY KEY)")?;
+        self.conn.execute("DELETE FROM _keep_paths", [])?;
 
-        let params: Vec<&dyn rusqlite::types::ToSql> = current_paths
-            .iter()
-            .map(|p| p as &dyn rusqlite::types::ToSql)
-            .collect();
+        {
+            let mut stmt = self
+                .conn
+                .prepare_cached("INSERT OR IGNORE INTO _keep_paths (path) VALUES (?1)")?;
+            for path in current_paths {
+                stmt.execute(params![path])?;
+            }
+        }
 
-        let removed = self.conn.execute(&sql, params.as_slice())?;
+        let removed = self.conn.execute(
+            "DELETE FROM notes WHERE path NOT IN (SELECT path FROM _keep_paths)",
+            [],
+        )?;
+
+        self.conn.execute("DELETE FROM _keep_paths", [])?;
         Ok(removed)
     }
 

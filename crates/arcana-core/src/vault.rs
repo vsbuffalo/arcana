@@ -393,6 +393,14 @@ impl Vault {
         Ok(())
     }
 
+    /// Write pre-built note content atomically and reindex.
+    pub fn write_note_content(&self, rel_path: &str, content: &str) -> Result<()> {
+        let full_path = self.root.join(rel_path);
+        crate::writer::atomic_write(&full_path, content.as_bytes())?;
+        self.reindex_paths(&[full_path])?;
+        Ok(())
+    }
+
     pub fn git(&self) -> Option<&VaultGit> {
         self.git.as_ref()
     }

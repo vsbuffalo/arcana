@@ -87,6 +87,10 @@ fn parse_zones(taxonomy: &str) -> Vec<String> {
         }
     }
 
+    if zones.is_empty() && !taxonomy.is_empty() {
+        tracing::warn!("taxonomy file exists but no zones were parsed (expected `## Zones` section with `### name/` headers)");
+    }
+
     zones
 }
 

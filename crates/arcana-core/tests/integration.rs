@@ -88,7 +88,7 @@ fn tag_filter_search() {
             text: "rust".to_string(),
             limit: Some(10),
             filters: SearchFilters {
-                tags: vec!["programming".to_string()],
+                tag: Some("programming".to_string()),
                 ..Default::default()
             },
         })

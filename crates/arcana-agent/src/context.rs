@@ -36,9 +36,13 @@ pub fn generate_context(vault: &Vault, query: &str, limit: usize) -> String {
                     format!(" tags=\"{}\"", note.frontmatter.tags.join(", "))
                 };
 
-                // Truncate body to reasonable size for context
+                // Truncate body to reasonable size for context (char-boundary safe)
                 let body = if note.body.len() > 2000 {
-                    format!("{}...", &note.body[..2000])
+                    let mut end = 2000;
+                    while !note.body.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    format!("{}...", &note.body[..end])
                 } else {
                     note.body.clone()
                 };

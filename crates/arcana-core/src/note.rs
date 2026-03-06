@@ -40,7 +40,6 @@ pub struct AiMeta {
     pub provider: String,
     pub agent_session: String,
     pub task: String,
-    pub prompt: String,
     #[serde(default)]
     pub sources: Vec<String>,
     pub confidence: Confidence,

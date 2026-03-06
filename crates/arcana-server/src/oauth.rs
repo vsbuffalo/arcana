@@ -119,7 +119,8 @@ pub struct RegisterRequest {
 #[derive(serde::Serialize)]
 struct RegisterResponse {
     client_id: String,
-    client_secret: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_secret: Option<String>,
     client_id_issued_at: u64,
     client_secret_expires_at: u64,
     redirect_uris: Vec<String>,
@@ -131,7 +132,7 @@ pub async fn register(
 ) -> impl IntoResponse {
     axum::Json(RegisterResponse {
         client_id: state.config.client_id.clone(),
-        client_secret: state.config.client_secret.clone(),
+        client_secret: None,
         client_id_issued_at: 0,
         client_secret_expires_at: 0,
         redirect_uris: body.redirect_uris.unwrap_or_default(),
@@ -360,10 +361,13 @@ pub async fn bearer_auth(
         }
     }
 
-    // Check OAuth-issued tokens
+    // Check OAuth-issued tokens and prune expired ones opportunistically
     let valid = {
-        let tokens = state.access_tokens.read().await;
-        matches!(tokens.get(token), Some(t) if t.created_at.elapsed() < ACCESS_TOKEN_TTL)
+        let mut tokens = state.access_tokens.write().await;
+        let is_valid =
+            matches!(tokens.get(token), Some(t) if t.created_at.elapsed() < ACCESS_TOKEN_TTL);
+        tokens.retain(|_, t| t.created_at.elapsed() < ACCESS_TOKEN_TTL);
+        is_valid
     };
 
     if valid {
@@ -387,11 +391,7 @@ fn unauthorized() -> Response {
 }
 
 fn error_json(status: StatusCode, error: &str) -> Response {
-    (
-        status,
-        axum::Json(serde_json::json!({ "error": error })),
-    )
-        .into_response()
+    (status, axum::Json(serde_json::json!({ "error": error }))).into_response()
 }
 
 fn extract_client_credentials(

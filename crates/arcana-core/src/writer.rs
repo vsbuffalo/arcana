@@ -150,7 +150,7 @@ fn suggest_zone(rel_path: &str, projects: &[String]) -> Option<String> {
     None
 }
 
-fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| ArcanaError::Io(std::io::Error::other("no parent directory")))?;
