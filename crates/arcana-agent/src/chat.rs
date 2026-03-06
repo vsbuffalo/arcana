@@ -13,7 +13,8 @@ use crate::types::{ContentBlock, Message, StopReason, ToolDef, Usage};
 use arcana_core::{BrainProfile, Vault};
 
 /// Callback type for approval requests.
-pub type ApprovalFn<'a> = &'a (dyn Fn(&str, &str, &serde_json::Value) -> ApprovalResult + Send + Sync);
+pub type ApprovalFn<'a> =
+    &'a (dyn Fn(&str, &str, &serde_json::Value) -> ApprovalResult + Send + Sync);
 
 /// Response from a chat turn.
 pub struct ChatResponse {
@@ -78,9 +79,8 @@ impl ChatSession {
         let mut permissioned =
             PermissionedExecutor::new(vault_executor, Box::new(chat_permissions));
         if let Some(af) = approval_fn {
-            permissioned = permissioned.with_approval(Box::new(move |name, desc, input| {
-                af(name, desc, input)
-            }));
+            permissioned = permissioned
+                .with_approval(Box::new(move |name, desc, input| af(name, desc, input)));
         }
         let executor: &dyn ToolExecutor = &permissioned;
 
@@ -151,9 +151,7 @@ impl ChatSession {
 
                             // Track drafts
                             if name == "vault_draft" || name == "vault_suggest_edit" {
-                                if let Some(path) =
-                                    input.get("path").and_then(|v| v.as_str())
-                                {
+                                if let Some(path) = input.get("path").and_then(|v| v.as_str()) {
                                     drafts_created.push(path.to_string());
                                 }
                             }

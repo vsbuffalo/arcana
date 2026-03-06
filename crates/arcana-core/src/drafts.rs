@@ -467,7 +467,10 @@ impl DraftManager {
 fn remove_empty_parents(dir: &Path, stop_at: &Path) {
     let mut current = dir.to_path_buf();
     while current.starts_with(stop_at) && current != stop_at {
-        if fs::read_dir(&current).map(|mut d| d.next().is_none()).unwrap_or(false) {
+        if fs::read_dir(&current)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(false)
+        {
             if fs::remove_dir(&current).is_err() {
                 break;
             }

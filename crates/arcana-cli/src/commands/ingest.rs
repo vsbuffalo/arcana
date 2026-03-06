@@ -284,7 +284,12 @@ fn handle_event(event: &IngestEvent) {
             tokens_used,
         } => {
             if *iteration == 0 {
-                eprintln!("  {} [{}/{}]", "explore".bold(), iteration + 1, max_iterations);
+                eprintln!(
+                    "  {} [{}/{}]",
+                    "explore".bold(),
+                    iteration + 1,
+                    max_iterations
+                );
             } else {
                 eprintln!();
                 eprintln!(
@@ -390,9 +395,7 @@ fn edit_plan(plan: &IngestPlan) -> Result<IngestPlan> {
                   # Remove notes you don't want, adjust paths/titles/summaries.\n\
                   # Save and close the editor to continue.\n\n";
 
-    let mut tmp = tempfile::Builder::new()
-        .suffix(".toml")
-        .tempfile()?;
+    let mut tmp = tempfile::Builder::new().suffix(".toml").tempfile()?;
     tmp.write_all(header.as_bytes())?;
     tmp.write_all(toml_str.as_bytes())?;
     tmp.flush()?;
@@ -479,11 +482,7 @@ fn print_plan(plan: &IngestPlan) {
 
     for note in &plan.notes {
         eprintln!("  {} {}", "→".dimmed(), note.path.cyan());
-        eprintln!(
-            "    {} \"{}\"",
-            note.title.bold(),
-            note.summary.dimmed()
-        );
+        eprintln!("    {} \"{}\"", note.title.bold(), note.summary.dimmed());
         if !note.source_files.is_empty() {
             eprintln!(
                 "    {} {}",

@@ -227,13 +227,9 @@ pub fn run_review(args: ReviewArgs, config: ArcanaConfig, json: bool) -> Result<
                         vault.reindex_paths(std::slice::from_ref(&target))?;
 
                         if let Some(git) = vault.git() {
-                            let msg =
-                                format!("arcana: approve draft (edited) {}", draft.path);
-                            git.commit_ai_write(
-                                &[std::path::Path::new(&draft.path)],
-                                &msg,
-                            )
-                            .ok();
+                            let msg = format!("arcana: approve draft (edited) {}", draft.path);
+                            git.commit_ai_write(&[std::path::Path::new(&draft.path)], &msg)
+                                .ok();
                         }
                         eprintln!("  {}", "approved (edited)".green());
                     } else {
@@ -241,8 +237,8 @@ pub fn run_review(args: ReviewArgs, config: ArcanaConfig, json: bool) -> Result<
                     }
                     break;
                 }
-                "a" | "approve" | "d" | "D" | "delete" | "r" | "R" | "revise" | "s"
-                | "S" | "skip" | "A" | "all" | "" => {
+                "a" | "approve" | "d" | "D" | "delete" | "r" | "R" | "revise" | "s" | "S"
+                | "skip" | "A" | "all" | "" => {
                     done = handle_draft_action(
                         &choice, draft, &pending, i, session_id, drafts, &vault,
                     )?;
@@ -302,7 +298,10 @@ fn handle_draft_action(
             Ok(true)
         }
         "r" | "R" | "revise" => {
-            eprintln!("  {}", "revise is not yet implemented — coming soon".yellow());
+            eprintln!(
+                "  {}",
+                "revise is not yet implemented — coming soon".yellow()
+            );
             Ok(false)
         }
         "s" | "S" | "skip" | "" => {
@@ -356,9 +355,7 @@ fn edit_in_editor(path: &std::path::Path) -> Result<bool> {
     let before = std::fs::read_to_string(path)?;
 
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".into());
-    let status = std::process::Command::new(&editor)
-        .arg(path)
-        .status()?;
+    let status = std::process::Command::new(&editor).arg(path).status()?;
 
     if !status.success() {
         anyhow::bail!("editor exited with non-zero status");

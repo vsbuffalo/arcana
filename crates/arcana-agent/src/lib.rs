@@ -19,14 +19,14 @@ pub use chat::{ChatResponse, ChatSession};
 pub use context::generate_context;
 pub use error::AgentError;
 pub use executor::{CompositeExecutor, PermissionedExecutor, ToolExecutor};
+pub use ingest::{
+    run_ingest_auto, Done as IngestDone, Explored as IngestExplored, Fresh as IngestFresh, Ingest,
+    IngestConfig, IngestEvent, IngestPlan, Planned as IngestPlanned,
+};
 pub use permissions::{ApprovalResult, ToolPermission};
+pub use pricing::CostEstimate;
 pub use project_tools::ProjectToolExecutor;
 pub use prompt::build_system_prompt;
-pub use ingest::{
-    run_ingest_auto, Done as IngestDone, Explored as IngestExplored, Fresh as IngestFresh,
-    Ingest, IngestConfig, IngestEvent, IngestPlan, Planned as IngestPlanned,
-};
-pub use pricing::CostEstimate;
 pub use tidy::{
     run_tidy_auto, SourceNote, Tidy, TidyConfig, TidyDone, TidyEvent, TidyPlan, TidyPlanned,
     Unsurveyed, VaultSurveyed,

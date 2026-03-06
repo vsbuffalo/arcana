@@ -34,17 +34,31 @@ impl Default for AgentConfig {
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    IterationStart { iteration: usize },
+    IterationStart {
+        iteration: usize,
+    },
     ToolStart {
         name: String,
         input: serde_json::Value,
     },
-    ToolFinish { name: String },
-    Text { text: String },
-    TokenWarning { used: u64, budget: u64 },
-    Done { usage: Usage },
+    ToolFinish {
+        name: String,
+    },
+    Text {
+        text: String,
+    },
+    TokenWarning {
+        used: u64,
+        budget: u64,
+    },
+    Done {
+        usage: Usage,
+    },
     MaxIterationsReached,
-    TokenBudgetExhausted { used: u64, budget: u64 },
+    TokenBudgetExhausted {
+        used: u64,
+        budget: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------

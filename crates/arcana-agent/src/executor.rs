@@ -223,7 +223,10 @@ mod tests {
 
     #[tokio::test]
     async fn composite_tool_defs_flat_maps() {
-        let project = Arc::new(MockExecutor::new("project_", &["project_tree", "project_read"]));
+        let project = Arc::new(MockExecutor::new(
+            "project_",
+            &["project_tree", "project_read"],
+        ));
         let vault = Arc::new(MockExecutor::new("vault_", &["vault_search"]));
 
         let composite = CompositeExecutor::new()
@@ -291,13 +294,11 @@ mod tests {
     #[tokio::test]
     async fn permissioned_approval_callback() {
         let inner = MockExecutor::new("vault_", &["vault_draft"]);
-        let executor = PermissionedExecutor::new(
-            inner,
-            Box::new(|_| ToolPermission::RequiresApproval),
-        )
-        .with_approval(Box::new(|_name, _desc, _input| {
-            ApprovalResult::Reject("user said no".into())
-        }));
+        let executor =
+            PermissionedExecutor::new(inner, Box::new(|_| ToolPermission::RequiresApproval))
+                .with_approval(Box::new(|_name, _desc, _input| {
+                    ApprovalResult::Reject("user said no".into())
+                }));
 
         let result = executor
             .execute("vault_draft", &serde_json::json!({"path": "test.md"}))

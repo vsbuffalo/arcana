@@ -166,12 +166,9 @@ fn main() -> Result<()> {
             tracing::debug!("loading vault config from {}", vault_local.display());
         }
 
-        arcana_core::load_merged(
-            global_path.as_deref(),
-            Some(&vault_local),
-        )
-        .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?
-        .with_vault_path(vault_path)
+        arcana_core::load_merged(global_path.as_deref(), Some(&vault_local))
+            .map_err(|e| anyhow::anyhow!("failed to load config: {}", e))?
+            .with_vault_path(vault_path)
     };
 
     let mut config = config;

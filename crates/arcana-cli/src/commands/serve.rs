@@ -48,13 +48,11 @@ pub fn run_serve(args: ServeArgs, config: ArcanaConfig) -> Result<()> {
         &args.oauth_client_secret,
         &args.oauth_password,
     ) {
-        (Some(id), Some(secret), Some(password)) => {
-            Some(arcana_server::OAuthConfig {
-                client_id: id.clone(),
-                client_secret: secret.clone(),
-                password: password.clone(),
-            })
-        }
+        (Some(id), Some(secret), Some(password)) => Some(arcana_server::OAuthConfig {
+            client_id: id.clone(),
+            client_secret: secret.clone(),
+            password: password.clone(),
+        }),
         (None, None, None) => None,
         _ => {
             anyhow::bail!(
