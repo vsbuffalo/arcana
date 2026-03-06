@@ -71,6 +71,7 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
     let domain_skill = skill.as_ref().map(|s| s.body.clone());
 
     let brain_profile = vault.profile().clone();
+    let user_prompts = arcana_agent::UserPrompts::load(&config.vault.path);
 
     let project_name = project_path
         .file_name()
@@ -143,6 +144,7 @@ pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String
             vault_arc,
             brain_profile,
             domain_skill,
+            user_prompts,
             Some(event_tx),
         )
         .map_err(|e| anyhow::anyhow!("{e}"))?;

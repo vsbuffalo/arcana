@@ -226,6 +226,7 @@ struct TidyInner {
     vault: Arc<Mutex<Vault>>,
     profile: BrainProfile,
     domain_skill: Option<String>,
+    user_prompts: crate::prompts::UserPrompts,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
 }
 
@@ -254,6 +255,7 @@ impl Tidy<Unsurveyed> {
         vault: Arc<Mutex<Vault>>,
         profile: BrainProfile,
         domain_skill: Option<String>,
+        user_prompts: crate::prompts::UserPrompts,
         event_tx: Option<tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
     ) -> Self {
         Self {
@@ -263,6 +265,7 @@ impl Tidy<Unsurveyed> {
                 vault,
                 profile,
                 domain_skill,
+                user_prompts,
                 event_tx,
             },
         }
@@ -324,6 +327,7 @@ impl Tidy<Surveyed> {
             &self.phase.vault_context,
             &self.inner.profile,
             self.inner.domain_skill.as_deref(),
+            &self.inner.user_prompts,
             self.inner.event_tx.as_ref(),
         )
         .await?;
@@ -354,6 +358,7 @@ impl Tidy<VaultSurveyed> {
             &self.phase.summaries,
             &self.phase.vault_tree,
             &self.inner.profile,
+            &self.inner.user_prompts,
             self.inner.event_tx.as_ref(),
         )
         .await?;
@@ -500,6 +505,7 @@ impl Tidy<TidyPlanned> {
                 &self.phase.vault_context,
                 &self.inner.profile,
                 self.inner.domain_skill.as_deref(),
+                &self.inner.user_prompts,
                 drafts,
                 &session_id,
                 self.inner.event_tx.as_ref(),
@@ -568,19 +574,21 @@ impl Tidy<TidyDone> {
 // ---------------------------------------------------------------------------
 
 /// Run the full tidy pipeline: survey → plan → generate → drafts.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_tidy_auto(
     llm: Box<dyn LlmBackend>,
     vault: Arc<Mutex<Vault>>,
     target_paths: Vec<String>,
     profile: BrainProfile,
     domain_skill: Option<String>,
+    user_prompts: crate::prompts::UserPrompts,
     config: &TidyConfig,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
 ) -> Result<Tidy<TidyDone>> {
     // config reserved for future use (e.g. max_tokens guard)
     let _ = config;
 
-    let tidy = Tidy::new(llm, vault, profile, domain_skill, event_tx)
+    let tidy = Tidy::new(llm, vault, profile, domain_skill, user_prompts, event_tx)
         .survey(&target_paths)
         .await?
         .plan()
@@ -811,6 +819,7 @@ async fn run_plan_vault(
     summaries: &[VaultNoteSummary],
     vault_tree: &str,
     profile: &BrainProfile,
+    user_prompts: &crate::prompts::UserPrompts,
     event_tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
 ) -> Result<(TidyPlan, Usage)> {
     send_event(event_tx, TidyEvent::PlanStart);
@@ -824,13 +833,11 @@ async fn run_plan_vault(
     user_msg.push_str(vault_tree);
     user_msg.push_str("</vault_tree>");
 
-    let system = build_system_prompt(
-        profile.taxonomy(),
-        profile.style(),
-        None,
-        VAULT_PLAN_TASK,
-        None,
-    );
+    let task = user_prompts
+        .tidy_audit
+        .as_deref()
+        .unwrap_or(VAULT_PLAN_TASK);
+    let system = build_system_prompt(profile.taxonomy(), profile.style(), None, task, None);
 
     let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
 
@@ -939,6 +946,7 @@ async fn run_plan_tidy(
     vault_context: &str,
     profile: &BrainProfile,
     domain_skill: Option<&str>,
+    user_prompts: &crate::prompts::UserPrompts,
     event_tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
 ) -> Result<(TidyPlan, Usage)> {
     send_event(event_tx, TidyEvent::PlanStart);
@@ -952,11 +960,12 @@ async fn run_plan_tidy(
     }
     user_msg.push_str("</source_notes>");
 
+    let task = user_prompts.tidy_plan.as_deref().unwrap_or(PLAN_TASK);
     let system = build_system_prompt(
         profile.taxonomy(),
         profile.style(),
         domain_skill,
-        PLAN_TASK,
+        task,
         if vault_context.is_empty() {
             None
         } else {
@@ -1146,6 +1155,7 @@ async fn run_generate(
     vault_context: &str,
     profile: &BrainProfile,
     domain_skill: Option<&str>,
+    user_prompts: &crate::prompts::UserPrompts,
     drafts: &DraftManager,
     session_id: &str,
     event_tx: Option<&tokio::sync::mpsc::UnboundedSender<TidyEvent>>,
@@ -1186,11 +1196,15 @@ async fn run_generate(
                 content = task.source_content,
             );
 
+            let task_prompt = user_prompts
+                .tidy_generate
+                .as_deref()
+                .unwrap_or(GENERATE_TASK);
             let system = build_system_prompt(
                 profile.taxonomy(),
                 profile.style(),
                 domain_skill,
-                GENERATE_TASK,
+                task_prompt,
                 if vault_context.is_empty() {
                     None
                 } else {
@@ -1369,6 +1383,7 @@ mod tests {
             Arc::new(Mutex::new(vault)),
             profile,
             None,
+            crate::prompts::UserPrompts::default(),
             None,
         )
         .survey(&["inbox/dump.md".into()])
@@ -1436,6 +1451,7 @@ mod tests {
             vec!["inbox/note.md".into()],
             profile,
             None,
+            crate::prompts::UserPrompts::default(),
             &tidy_config,
             None,
         )
@@ -1487,6 +1503,7 @@ mod tests {
             vec!["inbox/test.md".into()],
             BrainProfile::default(),
             None,
+            crate::prompts::UserPrompts::default(),
             &TidyConfig::default(),
             Some(event_tx),
         )

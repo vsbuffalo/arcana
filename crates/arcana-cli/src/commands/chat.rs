@@ -54,6 +54,7 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig, profile: Option<String>) -
     };
 
     let profile = vault.profile().clone();
+    let user_prompts = arcana_agent::UserPrompts::load(&config.vault.path);
 
     eprintln!(
         "{} {} ({})",
@@ -80,7 +81,14 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig, profile: Option<String>) -
     eprintln!();
 
     let vault = Arc::new(Mutex::new(vault));
-    let mut session = ChatSession::new(backend, vault, session_id, agent_config, &profile);
+    let mut session = ChatSession::new(
+        backend,
+        vault,
+        session_id,
+        agent_config,
+        &profile,
+        &user_prompts,
+    );
 
     // Set up history file
     let history_path = config.vault.path.join(".arcana").join("chat_history");
@@ -141,6 +149,7 @@ pub fn run_chat(args: ChatArgs, config: ArcanaConfig, profile: Option<String>) -
                                     wrap_up_message: None,
                                 },
                                 &profile,
+                                &user_prompts,
                             );
                             eprintln!("{}", "conversation cleared".dimmed());
                             continue;

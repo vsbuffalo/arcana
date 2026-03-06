@@ -102,6 +102,7 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
     })?;
 
     let brain_profile = vault.profile().clone();
+    let user_prompts = arcana_agent::UserPrompts::load(&config.vault.path);
     let model_name = backend.model_name().to_string();
 
     eprintln!(
@@ -148,7 +149,14 @@ pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -
         });
 
         // --- Phase 1+2: Survey + Plan ---
-        let tidy = Tidy::new(backend, vault_arc, brain_profile, None, Some(event_tx));
+        let tidy = Tidy::new(
+            backend,
+            vault_arc,
+            brain_profile,
+            None,
+            user_prompts,
+            Some(event_tx),
+        );
 
         let tidy = match tidy.survey(&target_paths).await {
             Ok(r) => r,
@@ -268,6 +276,7 @@ fn run_tidy_vault(args: TidyArgs, config: ArcanaConfig, profile: Option<String>)
     vault.index()?;
 
     let brain_profile = vault.profile().clone();
+    let user_prompts = arcana_agent::UserPrompts::load(&config.vault.path);
     if brain_profile.taxonomy().is_none() {
         eprintln!(
             "{}: --audit requires a taxonomy in .arcana/taxonomy.md",
@@ -318,7 +327,14 @@ fn run_tidy_vault(args: TidyArgs, config: ArcanaConfig, profile: Option<String>)
             }
         });
 
-        let tidy = Tidy::new(backend, vault_arc, brain_profile, None, Some(event_tx));
+        let tidy = Tidy::new(
+            backend,
+            vault_arc,
+            brain_profile,
+            None,
+            user_prompts,
+            Some(event_tx),
+        );
 
         let tidy = match tidy.survey_vault().await {
             Ok(r) => r,

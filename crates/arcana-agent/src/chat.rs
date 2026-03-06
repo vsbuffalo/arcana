@@ -42,8 +42,10 @@ impl ChatSession {
         session_id: String,
         config: AgentConfig,
         profile: &BrainProfile,
+        user_prompts: &crate::prompts::UserPrompts,
     ) -> Self {
-        let system_prompt = build_librarian_prompt(profile.taxonomy(), profile.style());
+        let system_prompt =
+            build_librarian_prompt(profile.taxonomy(), profile.style(), user_prompts);
         let tools = VaultToolExecutor::chat_tool_defs();
 
         Self {
@@ -238,8 +240,13 @@ const LIBRARIAN_TASK: &str = r#"You are a librarian for this Obsidian knowledge 
 ## Tips for the user
 - Suggest `arcana context "<topic>"` when the user wants to export vault context for use in other tools or conversations"#;
 
-fn build_librarian_prompt(taxonomy: Option<&str>, style: Option<&str>) -> String {
-    crate::prompt::build_system_prompt(taxonomy, style, None, LIBRARIAN_TASK, None)
+fn build_librarian_prompt(
+    taxonomy: Option<&str>,
+    style: Option<&str>,
+    user_prompts: &crate::prompts::UserPrompts,
+) -> String {
+    let task = user_prompts.chat.as_deref().unwrap_or(LIBRARIAN_TASK);
+    crate::prompt::build_system_prompt(taxonomy, style, None, task, None)
 }
 
 #[cfg(test)]
@@ -264,6 +271,7 @@ mod tests {
             "test-session".into(),
             AgentConfig::default(),
             &BrainProfile::default(),
+            &crate::prompts::UserPrompts::default(),
         );
 
         let response = session.send("hello", None, None).await.unwrap();
@@ -310,6 +318,7 @@ mod tests {
             "test-session".into(),
             AgentConfig::default(),
             &BrainProfile::default(),
+            &crate::prompts::UserPrompts::default(),
         );
 
         let response = session
@@ -357,6 +366,7 @@ mod tests {
             "test-session".into(),
             AgentConfig::default(),
             &BrainProfile::default(),
+            &crate::prompts::UserPrompts::default(),
         );
 
         let r1 = session.send("hello", None, None).await.unwrap();

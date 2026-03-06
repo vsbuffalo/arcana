@@ -150,6 +150,7 @@ struct IngestInner {
     vault_executor: VaultToolExecutor,
     profile: BrainProfile,
     domain_skill: Option<String>,
+    user_prompts: crate::prompts::UserPrompts,
     event_tx: Option<mpsc::UnboundedSender<IngestEvent>>,
 }
 
@@ -179,6 +180,7 @@ impl Ingest<Fresh> {
         vault: Arc<Mutex<Vault>>,
         profile: BrainProfile,
         domain_skill: Option<String>,
+        user_prompts: crate::prompts::UserPrompts,
         event_tx: Option<mpsc::UnboundedSender<IngestEvent>>,
     ) -> Result<Self> {
         let project = ProjectToolExecutor::new(project_root)
@@ -210,6 +212,7 @@ impl Ingest<Fresh> {
                 vault_executor,
                 profile,
                 domain_skill,
+                user_prompts,
                 event_tx,
             },
         })
@@ -222,6 +225,7 @@ impl Ingest<Fresh> {
             &self.inner.vault_executor,
             &self.inner.profile,
             self.inner.domain_skill.as_deref(),
+            &self.inner.user_prompts,
             config,
             self.inner.event_tx.as_ref(),
         )
@@ -260,6 +264,7 @@ impl Ingest<Explored> {
             &vault_context,
             &self.inner.profile,
             self.inner.domain_skill.as_deref(),
+            &self.inner.user_prompts,
             self.inner.event_tx.as_ref(),
         )
         .await?;
@@ -377,6 +382,7 @@ impl Ingest<Planned> {
                 &v,
                 &self.inner.profile,
                 self.inner.domain_skill.as_deref(),
+                &self.inner.user_prompts,
                 drafts,
                 &session_id,
                 self.inner.event_tx.as_ref(),
@@ -445,20 +451,30 @@ impl Ingest<Done> {
 // ---------------------------------------------------------------------------
 
 /// Run the full ingest pipeline: explore → plan → generate → drafts.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_ingest_auto(
     llm: Box<dyn LlmBackend>,
     project_root: &Path,
     vault: Arc<Mutex<Vault>>,
     profile: BrainProfile,
     domain_skill: Option<String>,
+    user_prompts: crate::prompts::UserPrompts,
     config: &IngestConfig,
     event_tx: Option<mpsc::UnboundedSender<IngestEvent>>,
 ) -> Result<Ingest<Done>> {
-    let ingest = Ingest::new(llm, project_root, vault, profile, domain_skill, event_tx)?
-        .explore(config)
-        .await?
-        .plan()
-        .await?;
+    let ingest = Ingest::new(
+        llm,
+        project_root,
+        vault,
+        profile,
+        domain_skill,
+        user_prompts,
+        event_tx,
+    )?
+    .explore(config)
+    .await?
+    .plan()
+    .await?;
 
     if ingest.plan().notes.is_empty() {
         return Ok(ingest.skip_generate());
@@ -602,12 +618,14 @@ Body content here with [[wikilinks]] to related notes."#;
 // Phase 1: Explore (private)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_explore(
     llm: &dyn LlmBackend,
     project_executor: &ProjectToolExecutor,
     vault_executor: &VaultToolExecutor,
     profile: &BrainProfile,
     domain_skill: Option<&str>,
+    user_prompts: &crate::prompts::UserPrompts,
     config: &IngestConfig,
     event_tx: Option<&mpsc::UnboundedSender<IngestEvent>>,
 ) -> Result<(String, Usage)> {
@@ -629,11 +647,12 @@ async fn run_explore(
         },
     );
 
+    let task = user_prompts.explore.as_deref().unwrap_or(EXPLORE_TASK);
     let system = build_system_prompt(
         profile.taxonomy(),
         profile.style(),
         domain_skill,
-        EXPLORE_TASK,
+        task,
         None,
     );
 
@@ -800,17 +819,19 @@ async fn run_plan(
     vault_context: &str,
     profile: &BrainProfile,
     domain_skill: Option<&str>,
+    user_prompts: &crate::prompts::UserPrompts,
     event_tx: Option<&mpsc::UnboundedSender<IngestEvent>>,
 ) -> Result<(IngestPlan, Usage)> {
     send_event(event_tx, IngestEvent::PlanStart);
 
     let user_msg = format!("<exploration_summary>\n{exploration_summary}\n</exploration_summary>");
 
+    let task = user_prompts.ingest_plan.as_deref().unwrap_or(PLAN_TASK);
     let system = build_system_prompt(
         profile.taxonomy(),
         profile.style(),
         domain_skill,
-        PLAN_TASK,
+        task,
         if vault_context.is_empty() {
             None
         } else {
@@ -849,6 +870,7 @@ async fn run_generate(
     vault: &arcana_core::Vault,
     profile: &BrainProfile,
     domain_skill: Option<&str>,
+    user_prompts: &crate::prompts::UserPrompts,
     drafts: &arcana_core::DraftManager,
     session_id: &str,
     event_tx: Option<&mpsc::UnboundedSender<IngestEvent>>,
@@ -907,11 +929,15 @@ async fn run_generate(
         let query = format!("{} {}", note.title, note.summary);
         let vault_context = generate_context(vault, &query, 20);
 
+        let task = user_prompts
+            .ingest_generate
+            .as_deref()
+            .unwrap_or(GENERATE_TASK);
         let system = build_system_prompt(
             profile.taxonomy(),
             profile.style(),
             domain_skill,
-            GENERATE_TASK,
+            task,
             Some(&vault_context),
         );
 
@@ -1153,6 +1179,7 @@ mod tests {
             Arc::new(Mutex::new(vault)),
             profile,
             None,
+            crate::prompts::UserPrompts::default(),
             None,
         )
         .unwrap();
@@ -1230,6 +1257,7 @@ mod tests {
             Arc::new(Mutex::new(vault)),
             profile,
             None,
+            crate::prompts::UserPrompts::default(),
             &IngestConfig::default(),
             None,
         )
@@ -1304,6 +1332,7 @@ mod tests {
             Arc::new(Mutex::new(vault)),
             BrainProfile::default(),
             None,
+            crate::prompts::UserPrompts::default(),
             &IngestConfig::default(),
             None,
         )
@@ -1357,6 +1386,7 @@ mod tests {
             Arc::new(Mutex::new(vault)),
             BrainProfile::default(),
             None,
+            crate::prompts::UserPrompts::default(),
             &IngestConfig::default(),
             Some(event_tx),
         )
