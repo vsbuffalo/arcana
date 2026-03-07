@@ -24,7 +24,7 @@ use rmcp::{
     ServerHandler,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Tool input structs
@@ -686,66 +686,76 @@ fn start_watcher(
     config: ArcanaConfig,
     vault: Arc<tokio::sync::Mutex<Vault>>,
 ) -> Option<WatchHandle> {
+    let commit_interval = config.git.commit_interval_secs;
     let watcher = VaultWatcher::new(root, config);
     match watcher.start() {
         Ok(handle) => {
-            // The WatchHandle owns the mpsc::Receiver. We need to move it into
-            // the async task but also return it (so it doesn't get dropped, which
-            // would stop the watcher thread). Instead, we'll use a shared approach:
-            // spawn a blocking task that reads from the sync channel and forwards
-            // paths to an async channel.
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<PathBuf>>();
 
-            // Blocking thread: drain events from the sync channel, batch, and forward
-            let drain_handle = handle.rx.try_recv(); // just to check type
-            drop(drain_handle);
-
-            // We can't move handle.rx out, so we spawn a thread that periodically
-            // drains the handle and sends batches.
+            // Blocking thread: drain FS events, batch, forward to async channel
             std::thread::spawn({
-                // We need the handle to live here so the watcher thread stays alive
-                move || {
-                    loop {
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        let paths = handle.drain_paths();
-                        if !paths.is_empty() && tx.send(paths).is_err() {
-                            break; // receiver dropped, shut down
-                        }
+                move || loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let paths = handle.drain_paths();
+                    if !paths.is_empty() && tx.send(paths).is_err() {
+                        break;
                     }
                 }
             });
 
-            // Async task: receive batched paths and reindex
+            // Async task: reindex immediately, git-commit periodically
             tokio::spawn(async move {
-                while let Some(paths) = rx.recv().await {
-                    let vault = vault.lock().await;
-                    match vault.reindex_paths(&paths) {
-                        Ok(stats) => {
-                            if stats.notes_added > 0
-                                || stats.notes_updated > 0
-                                || stats.notes_removed > 0
-                            {
-                                info!(
-                                    "watcher reindex: +{} ~{} -{} notes",
-                                    stats.notes_added, stats.notes_updated, stats.notes_removed
-                                );
+                let mut dirty_paths: Vec<PathBuf> = Vec::new();
+                let commit_duration = std::time::Duration::from_secs(commit_interval);
+                let mut commit_timer = tokio::time::interval(commit_duration);
+                commit_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // Skip the first immediate tick
+                commit_timer.tick().await;
 
-                                // Commit changed files as human edits
-                                if let Some(git) = vault.git() {
-                                    match git.commit_human_change(&paths) {
-                                        Ok(Some(_)) => {
-                                            debug!(
-                                                "committed human changes for {} paths",
-                                                paths.len()
-                                            );
+                loop {
+                    tokio::select! {
+                        Some(paths) = rx.recv() => {
+                            // Reindex immediately — keeps search fresh
+                            let vault = vault.lock().await;
+                            match vault.reindex_paths(&paths) {
+                                Ok(stats) => {
+                                    if stats.notes_added > 0
+                                        || stats.notes_updated > 0
+                                        || stats.notes_removed > 0
+                                    {
+                                        info!(
+                                            "watcher reindex: +{} ~{} -{} notes",
+                                            stats.notes_added, stats.notes_updated, stats.notes_removed
+                                        );
+                                        // Accumulate for periodic commit
+                                        for p in &paths {
+                                            if !dirty_paths.contains(p) {
+                                                dirty_paths.push(p.clone());
+                                            }
                                         }
-                                        Ok(None) => {} // all paths were AI-written, nothing to commit
-                                        Err(e) => warn!("git commit for human changes failed: {e}"),
                                     }
                                 }
+                                Err(e) => warn!("watcher reindex failed: {e}"),
                             }
                         }
-                        Err(e) => warn!("watcher reindex failed: {e}"),
+                        _ = commit_timer.tick() => {
+                            if dirty_paths.is_empty() {
+                                continue;
+                            }
+                            let vault = vault.lock().await;
+                            if let Some(git) = vault.git() {
+                                match git.commit_human_change(&dirty_paths) {
+                                    Ok(Some(_)) => {
+                                        let msg = describe_changes(&dirty_paths);
+                                        info!("git: {msg}");
+                                    }
+                                    Ok(None) => {} // all AI-written
+                                    Err(e) => warn!("git commit failed: {e}"),
+                                }
+                            }
+                            dirty_paths.clear();
+                        }
+                        else => break,
                     }
                 }
             });
@@ -757,5 +767,31 @@ fn start_watcher(
             warn!("failed to start file watcher: {e}");
             None
         }
+    }
+}
+
+/// Build a human-readable commit description from changed paths.
+fn describe_changes(paths: &[PathBuf]) -> String {
+    let names: Vec<&str> = paths
+        .iter()
+        .filter_map(|p| p.to_str())
+        .map(|s| {
+            // Use just the relative filename or last two path components
+            let parts: Vec<&str> = s.rsplitn(3, '/').collect();
+            if parts.len() >= 2 {
+                // e.g. "microcontrollers/gpio.md"
+                let idx = s.len() - parts[0].len() - parts[1].len() - 1;
+                &s[idx..]
+            } else {
+                s
+            }
+        })
+        .collect();
+
+    let count = names.len();
+    match count {
+        1 => format!("update {}", names[0]),
+        2 => format!("update {} and {}", names[0], names[1]),
+        _ => format!("update {} (+{} more)", names[..2].join(", "), count - 2),
     }
 }

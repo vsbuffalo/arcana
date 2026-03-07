@@ -272,14 +272,13 @@ impl VaultGit {
             return Ok(None);
         }
 
-        let message = format!(
-            "vault: update {}",
-            human_paths
-                .iter()
-                .filter_map(|p| p.file_name().and_then(|f| f.to_str()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let names: Vec<&str> = human_paths.iter().filter_map(|p| p.to_str()).collect();
+        let message = match names.len() {
+            0 => "vault: update notes".to_string(),
+            1 => format!("vault: update {}", names[0]),
+            2 => format!("vault: update {}, {}", names[0], names[1]),
+            n => format!("vault: update {}, {} (+{} more)", names[0], names[1], n - 2),
+        };
 
         let oid = self.stage_and_commit(&human_paths, &message, Author::Human)?;
         Ok(Some(oid))
@@ -534,6 +533,7 @@ mod tests {
         GitConfig {
             enabled: true,
             auto_commit: true,
+            commit_interval_secs: 300,
             user_name: "test-user".to_string(),
             user_email: "test@example.com".to_string(),
             ai_name: "arcana-ai".to_string(),
@@ -565,6 +565,7 @@ mod tests {
         let config = GitConfig {
             enabled: true,
             auto_commit: true,
+            commit_interval_secs: 300,
             user_name: String::new(),
             user_email: String::new(),
             ai_name: "arcana-ai".to_string(),

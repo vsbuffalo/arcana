@@ -230,6 +230,9 @@ pub struct OperationOverrides {
 pub struct GitConfig {
     pub enabled: bool,
     pub auto_commit: bool,
+    /// How often (in seconds) the watcher commits accumulated human edits.
+    /// Default: 300 (5 minutes). Set to 0 to commit on every reindex.
+    pub commit_interval_secs: u64,
     pub user_name: String,
     pub user_email: String,
     pub ai_name: String,
@@ -241,6 +244,7 @@ impl Default for GitConfig {
         Self {
             enabled: true,
             auto_commit: true,
+            commit_interval_secs: 300,
             user_name: String::new(),
             user_email: String::new(),
             ai_name: "arcana-ai".to_string(),
