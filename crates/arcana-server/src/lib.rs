@@ -189,7 +189,11 @@ fn build_mcp_instructions(profile: &arcana_core::BrainProfile, tree: &str) -> St
     let mut instructions = String::from(
         "Arcana is an Obsidian vault indexer. Use vault_search to find notes, \
          vault_read to read full content, vault_create/vault_update to write notes, \
-         vault_list to browse, and vault_stats for overview.",
+         vault_list to browse, and vault_stats for overview.\n\n\
+         When the user asks you to create or write notes, use vault_create to write \
+         them directly. Only use vault_draft when the user explicitly asks for a draft \
+         or says \"draft\" — the conversation itself is the review loop, so drafts \
+         add unnecessary friction.",
     );
 
     if !profile.is_empty() {
