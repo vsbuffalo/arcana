@@ -24,7 +24,7 @@ use rmcp::{
     ServerHandler,
 };
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
 // Tool input structs
@@ -729,6 +729,20 @@ fn start_watcher(
                                     "watcher reindex: +{} ~{} -{} notes",
                                     stats.notes_added, stats.notes_updated, stats.notes_removed
                                 );
+
+                                // Commit changed files as human edits
+                                if let Some(git) = vault.git() {
+                                    match git.commit_human_change(&paths) {
+                                        Ok(Some(_)) => {
+                                            debug!(
+                                                "committed human changes for {} paths",
+                                                paths.len()
+                                            );
+                                        }
+                                        Ok(None) => {} // all paths were AI-written, nothing to commit
+                                        Err(e) => warn!("git commit for human changes failed: {e}"),
+                                    }
+                                }
                             }
                         }
                         Err(e) => warn!("watcher reindex failed: {e}"),
