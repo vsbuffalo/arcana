@@ -8,6 +8,7 @@ Short, atomic reference cards. One concept per note. Self-contained —
 readable with no context. These are the things I look up.
 
 What goes here:
+
 - Things I keep re-learning ("what is the Price equation again?")
 - Techniques that span projects (MCMC, FTS5, SPI protocol)
 - Definitions, patterns, gotchas, mental models
@@ -23,6 +24,7 @@ ideas, connecting threads, building understanding over time. These
 are the journal entries — thinking on paper.
 
 What goes here:
+
 - Extended treatments of a topic (derivations, worked examples)
 - Connections between multiple concepts
 - Chat summaries and conversation distillations
@@ -39,6 +41,7 @@ reference decisions, status, and implementation details that
 only matter in context.
 
 Active projects (update as needed):
+
 - starsim/ — agent-based disease simulation framework
 - arcana/ — vault indexer and knowledge tools
 - clasp/ — personal agent/security system
@@ -48,6 +51,14 @@ Active projects (update as needed):
 
 Signals: references a specific codebase, dataset, or deadline.
 Implementation details, not general knowledge.
+
+### work-projects/
+
+Work-related projects. Same structure as projects/ but for
+professional/employer work that should stay separate from
+personal projects.
+
+Signals: tied to work codebase, work team, or employer context.
 
 ### ideas/
 
@@ -83,8 +94,9 @@ Zero structure required. `arcana tidy inbox/` processes it.
 2. Is there a longer exploration — connecting ideas, working through
    a derivation, summarizing a conversation? Route to notes/.
 
-3. Is there project-specific context? Route to the right project
-   subfolder. Link BACK to concept and notebook notes.
+3. Is there project-specific context? Route to projects/ for personal
+   work, work-projects/ for professional work. Link BACK to concept
+   and notebook notes.
 
 4. Is it a reaction to something external? Route to references/.
 
@@ -103,6 +115,7 @@ Zero structure required. `arcana tidy inbox/` processes it.
 ## Tags
 
 ### Type tags (pick one)
+
 - #concept — short reference card
 - #note — longer exploration / notebook entry
 - #project — tied to specific active work
@@ -111,6 +124,7 @@ Zero structure required. `arcana tidy inbox/` processes it.
 - #writing — essay or blog draft
 
 ### Status tags
+
 - #unsorted — captured but not classified
 - #stub — intentionally minimal, expand later
 - #draft — longer but unfinished
@@ -118,6 +132,7 @@ Zero structure required. `arcana tidy inbox/` processes it.
 - #todo — needs more work (can combine with others)
 
 ### Domain tags (pick 1-3)
+
 - #epi, #immunology, #typhoid, #polio — disease modeling
 - #abm, #calibration, #ode, #stochastic — modeling techniques
 - #math, #stats, #probability, #numerics — foundations
@@ -128,6 +143,7 @@ Zero structure required. `arcana tidy inbox/` processes it.
 - #meta — notes about note-taking, tools, process
 
 ### Rules
+
 - Every note gets at least one type tag + one domain tag
 - #todo can appear inline in the body to mark gaps
 - 2-4 tags per note. More means the note needs splitting.
