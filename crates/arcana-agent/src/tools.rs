@@ -194,10 +194,9 @@ impl VaultToolExecutor {
                         "type": "integer",
                         "description": "Maximum results to return (default: 20)"
                     },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Filter to notes with ALL of these tags"
+                    "tag": {
+                        "type": "string",
+                        "description": "Filter to notes carrying this tag"
                     },
                     "path_prefix": {
                         "type": "string",
@@ -230,7 +229,7 @@ impl VaultToolExecutor {
     fn list_def() -> ToolDef {
         ToolDef {
             name: "vault_list".into(),
-            description: "List notes in the vault, optionally filtered by path prefix and/or tags."
+            description: "List notes in the vault, optionally filtered by path prefix and/or a tag."
                 .into(),
             input_schema: serde_json::json!({
                 "type": "object",
@@ -239,10 +238,9 @@ impl VaultToolExecutor {
                         "type": "string",
                         "description": "Filter to notes under this path prefix"
                     },
-                    "tags": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Filter to notes with ALL of these tags"
+                    "tag": {
+                        "type": "string",
+                        "description": "Filter to notes carrying this tag"
                     },
                     "limit": {
                         "type": "integer",
@@ -277,7 +275,7 @@ impl VaultToolExecutor {
             #[serde(default)]
             limit: Option<usize>,
             #[serde(default)]
-            tags: Vec<String>,
+            tag: Option<String>,
             #[serde(default)]
             path_prefix: Option<String>,
         }
@@ -287,7 +285,7 @@ impl VaultToolExecutor {
             text: input.query,
             limit: input.limit,
             filters: SearchFilters {
-                tag: input.tags.into_iter().next(),
+                tag: input.tag,
                 path_prefix: input.path_prefix,
                 ..Default::default()
             },
@@ -427,14 +425,14 @@ impl VaultToolExecutor {
             #[serde(default)]
             path_prefix: Option<String>,
             #[serde(default)]
-            tags: Vec<String>,
+            tag: Option<String>,
             #[serde(default)]
             limit: Option<usize>,
         }
         let input: Input = serde_json::from_value(input.clone()).map_err(|e| e.to_string())?;
         let vault = self.vault.lock().await;
         let filters = SearchFilters {
-            tag: input.tags.into_iter().next(),
+            tag: input.tag,
             path_prefix: input.path_prefix,
             ..Default::default()
         };
@@ -594,6 +592,25 @@ mod tests {
             assert!(!def.name.is_empty());
             assert!(!def.description.is_empty());
             assert_eq!(def.input_schema["type"], "object");
+        }
+    }
+
+    #[test]
+    fn search_and_list_advertise_single_tag_not_a_lying_array() {
+        // The backend applies exactly one tag (SearchFilters.tag is a single
+        // Option<String>). The schema must not claim "ALL of these tags".
+        let defs = VaultToolExecutor::base_tool_defs();
+        for name in ["vault_search", "vault_list"] {
+            let def = defs.iter().find(|d| d.name == name).unwrap();
+            let props = &def.input_schema["properties"];
+            assert!(
+                props.get("tags").is_none(),
+                "{name} must not advertise a `tags` array"
+            );
+            assert_eq!(
+                props["tag"]["type"], "string",
+                "{name} must advertise a single `tag` string"
+            );
         }
     }
 

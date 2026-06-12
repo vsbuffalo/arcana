@@ -1064,8 +1064,9 @@ fn describe_tool_call(name: &str, input: &serde_json::Value) -> String {
             format!("reading {path}")
         }
         "project_search" => {
-            let query = input["query"].as_str().unwrap_or("?");
-            format!("searching \"{query}\"")
+            // The project_search schema field is `pattern`, not `query`.
+            let pattern = input["pattern"].as_str().unwrap_or("?");
+            format!("searching \"{pattern}\"")
         }
         "vault_search" => {
             let query = input["query"].as_str().unwrap_or("?");
