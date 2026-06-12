@@ -60,6 +60,10 @@ pub enum AgentEvent {
         used: u64,
         budget: u64,
     },
+    /// The model's turn was cut off by `max_tokens` — output is incomplete. Any
+    /// tool call truncated mid-emission is dropped from history so the next
+    /// request can't carry a `tool_use` without a matching `tool_result`.
+    Truncated,
 }
 
 // ---------------------------------------------------------------------------
@@ -125,10 +129,22 @@ pub async fn agent_loop(
             }
         }
 
-        // Check stop reason
-        if response.stop_reason == StopReason::EndTurn
-            || response.stop_reason == StopReason::MaxTokens
-        {
+        // Truncation: the turn was cut off mid-emission. Return the partial text
+        // *without* appending the assistant message — a half-emitted tool_use must
+        // not land in history (it would 400 the next request as a dangling
+        // tool_use), and the caller is signalled that output is incomplete.
+        if response.stop_reason == StopReason::MaxTokens {
+            warn!(
+                "response truncated at max_tokens after {} iterations ({} tokens)",
+                iteration + 1,
+                total_tokens
+            );
+            send_event(event_tx, AgentEvent::Truncated);
+            return Ok((response.text(), total_usage));
+        }
+
+        // Normal end of turn.
+        if response.stop_reason == StopReason::EndTurn {
             info!(
                 "agent finished after {} iterations ({} tokens)",
                 iteration + 1,
@@ -415,5 +431,62 @@ mod tests {
         // Should have stopped due to budget
         assert!(usage.total() >= 100);
         assert_eq!(text, "searching...");
+    }
+
+    #[tokio::test]
+    async fn max_tokens_mid_tool_call_emits_truncated_and_keeps_history_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note.md"), "hello").unwrap();
+        let executor = test_executor(dir.path());
+
+        // Truncated mid-tool_use.
+        let mock = MockBackend::new(vec![LlmResponse {
+            content: vec![
+                ContentBlock::Text {
+                    text: "partial".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "vault_search".into(),
+                    input: serde_json::json!({"query": "x"}),
+                },
+            ],
+            stop_reason: StopReason::MaxTokens,
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Default::default()
+            },
+        }]);
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut messages = vec![Message::user("search")];
+        let (text, _usage) = agent_loop(
+            &mock,
+            &SystemPrompt::default(),
+            &mut messages,
+            &executor,
+            &AgentConfig::default(),
+            Some(&tx),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(text, "partial");
+        // No dangling tool_use was appended to history.
+        let dangling = messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+        assert!(!dangling, "truncated tool_use must not enter history");
+
+        // A Truncated event was emitted (not Done).
+        rx.close();
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            events.push(e);
+        }
+        assert!(events.iter().any(|e| matches!(e, AgentEvent::Truncated)));
+        assert!(!events.iter().any(|e| matches!(e, AgentEvent::Done { .. })));
     }
 }

@@ -111,10 +111,27 @@ impl ChatSession {
                 }
             }
 
-            // Check for end of turn
-            if response.stop_reason == StopReason::EndTurn
-                || response.stop_reason == StopReason::MaxTokens
-            {
+            // Truncation: the turn was cut off by max_tokens. A tool_use may have
+            // been half-emitted — persisting it would leave a dangling tool_use in
+            // self.messages and 400 the *next* send(). Drop tool_use blocks before
+            // pushing (keep any partial text), and signal the caller.
+            if response.stop_reason == StopReason::MaxTokens {
+                let kept: Vec<ContentBlock> = response
+                    .content
+                    .into_iter()
+                    .filter(|b| !matches!(b, ContentBlock::ToolUse { .. }))
+                    .collect();
+                if !kept.is_empty() {
+                    self.messages.push(Message::assistant(kept));
+                }
+                if let Some(tx) = event_tx {
+                    let _ = tx.send(AgentEvent::Truncated);
+                }
+                break;
+            }
+
+            // Normal end of turn.
+            if response.stop_reason == StopReason::EndTurn {
                 self.messages.push(Message::assistant(response.content));
                 break;
             }
@@ -335,6 +352,59 @@ mod tests {
             .unwrap();
         assert_eq!(response.text, "I found a note about Rust!");
         assert!(response.tools_used.contains(&"vault_search".to_string()));
+    }
+
+    #[tokio::test]
+    async fn max_tokens_mid_tool_call_does_not_corrupt_history() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note.md"), "hello").unwrap();
+        let config = arcana_core::ArcanaConfig::default().with_vault_path(dir.path().to_path_buf());
+        let vault = arcana_core::Vault::open(config).unwrap();
+        vault.index().unwrap();
+
+        // Cutoff lands mid-tool_use: partial text + a tool_use, stopped at max_tokens.
+        let mock = MockBackend::new(vec![LlmResponse {
+            content: vec![
+                ContentBlock::Text {
+                    text: "Let me sea".into(),
+                },
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "vault_search".into(),
+                    input: serde_json::json!({"query": "hello"}),
+                },
+            ],
+            stop_reason: StopReason::MaxTokens,
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                ..Default::default()
+            },
+        }]);
+
+        let mut session = ChatSession::new(
+            Box::new(mock),
+            Arc::new(Mutex::new(vault)),
+            "test-session".into(),
+            AgentConfig::default(),
+            &BrainProfile::default(),
+            &crate::prompts::UserPrompts::default(),
+        );
+
+        let resp = session.send("search hello", None, None).await.unwrap();
+
+        // The truncated tool call was not executed...
+        assert!(resp.tools_used.is_empty());
+        // ...and no dangling tool_use survives in the persisted history (which
+        // would 400 the next request).
+        let dangling = session
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. }));
+        assert!(!dangling, "truncated tool_use must be dropped from history");
+        // The partial text is preserved.
+        assert_eq!(resp.text, "Let me sea");
     }
 
     #[tokio::test]
