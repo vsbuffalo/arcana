@@ -23,3 +23,6 @@ xxhash-rust.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# test-util enables tokio's paused clock (#[tokio::test(start_paused = true)])
+# so retry/backoff tests don't sleep in real time.
+tokio = { workspace = true, features = ["test-util"] }

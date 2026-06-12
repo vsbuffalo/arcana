@@ -32,7 +32,10 @@ impl OpenAiBackend {
             model,
             max_output_tokens,
             provider,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(super::REQUEST_TIMEOUT_SECS))
+                .build()
+                .unwrap_or_default(),
         }
     }
 

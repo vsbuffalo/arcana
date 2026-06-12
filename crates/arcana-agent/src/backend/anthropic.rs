@@ -24,7 +24,10 @@ impl AnthropicBackend {
             api_key,
             model: model.unwrap_or_else(|| "claude-sonnet-4-5-20250929".into()),
             max_output_tokens,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(super::REQUEST_TIMEOUT_SECS))
+                .build()
+                .unwrap_or_default(),
         }
     }
 }
