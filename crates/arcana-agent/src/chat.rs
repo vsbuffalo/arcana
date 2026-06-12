@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::executor::{PermissionedExecutor, ToolExecutor};
 use crate::permissions::{chat_permissions, ApprovalResult};
 use crate::tools::{SessionContext, VaultToolExecutor};
-use crate::types::{ContentBlock, Message, StopReason, SystemPrompt, ToolDef, Usage};
+use crate::types::{ContentBlock, Message, Role, StopReason, SystemPrompt, ToolDef, Usage};
 use crate::util::truncate_chars;
 use arcana_core::{BrainProfile, Vault};
 
@@ -68,6 +68,11 @@ impl ChatSession {
         event_tx: Option<&tokio::sync::mpsc::UnboundedSender<AgentEvent>>,
     ) -> Result<ChatResponse> {
         self.messages.push(Message::user(user_message));
+
+        // Bound the resent context: compact older turns before the window is
+        // approached. We're between turns here (no open tool round), so dropping
+        // at a clean turn boundary keeps the history API-valid.
+        self.compact_history();
 
         let vault_executor = VaultToolExecutor::new(
             self.vault.clone(),
@@ -222,6 +227,50 @@ impl ChatSession {
         })
     }
 
+    /// Drop the oldest turns when the estimated context (system prompt + history)
+    /// approaches the model's window, keeping the most recent turns that fit
+    /// under half the window. Cuts only at *fresh user turns* (a user message
+    /// with no tool_result blocks) so the kept history never starts with an
+    /// orphaned tool_result or splits a tool_use/tool_result pair.
+    fn compact_history(&mut self) {
+        let window = self.config.context_window_tokens;
+        let system_tokens = estimate_system_tokens(&self.system_prompt);
+        let used = system_tokens + estimate_messages_tokens(&self.messages);
+
+        // High-water mark: only act when we're genuinely approaching the window.
+        if used <= window / 4 * 3 {
+            return;
+        }
+        let target = window / 2;
+
+        // Candidate cut points, earliest first. messages[i..] shrinks as i grows,
+        // so the first one that fits keeps the most recent context possible.
+        let cut = self
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| starts_fresh_turn(m))
+            .map(|(i, _)| i)
+            .find(|&i| system_tokens + estimate_messages_tokens(&self.messages[i..]) <= target)
+            // No safe cut keeps us under target (one huge recent turn): fall back
+            // to the latest fresh-turn boundary to drop as much as we safely can.
+            .or_else(|| {
+                self.messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| starts_fresh_turn(m))
+                    .map(|(i, _)| i)
+                    .next_back()
+            });
+
+        if let Some(i) = cut {
+            if i > 0 {
+                debug!("compacting chat history: dropping {i} oldest messages");
+                self.messages.drain(0..i);
+            }
+        }
+    }
+
     pub fn model_name(&self) -> &str {
         self.llm.model_name()
     }
@@ -233,6 +282,39 @@ impl ChatSession {
     pub fn vault_ref(&self) -> Arc<Mutex<Vault>> {
         self.vault.clone()
     }
+}
+
+/// True if this message begins a fresh user turn (a user message with no
+/// tool_result blocks) — a safe boundary to drop history before.
+fn starts_fresh_turn(m: &Message) -> bool {
+    m.role == Role::User
+        && !m
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+}
+
+/// Rough token estimate for a content block (~4 chars/token + small overhead).
+/// Good enough to decide *when* to compact; not a billing figure.
+fn estimate_block_tokens(b: &ContentBlock) -> u64 {
+    let chars = match b {
+        ContentBlock::Text { text } => text.len(),
+        ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
+        ContentBlock::ToolResult { content, .. } => content.len(),
+    };
+    (chars as u64) / 4 + 8
+}
+
+fn estimate_messages_tokens(messages: &[Message]) -> u64 {
+    messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .map(estimate_block_tokens)
+        .sum()
+}
+
+fn estimate_system_tokens(sp: &SystemPrompt) -> u64 {
+    (sp.cached_prefix.len() + sp.dynamic_suffix.len()) as u64 / 4
 }
 
 /// Default task prompt for chat, for use with `--show-prompt`.
@@ -352,6 +434,48 @@ mod tests {
             .unwrap();
         assert_eq!(response.text, "I found a note about Rust!");
         assert!(response.tools_used.contains(&"vault_search".to_string()));
+    }
+
+    #[tokio::test]
+    async fn long_session_compacts_instead_of_growing_unbounded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note.md"), "hi").unwrap();
+        let config = arcana_core::ArcanaConfig::default().with_vault_path(dir.path().to_path_buf());
+        let vault = arcana_core::Vault::open(config).unwrap();
+        vault.index().unwrap();
+
+        // Empty mock → every send returns the small default EndTurn response.
+        let mock = MockBackend::new(vec![]);
+
+        let agent_config = AgentConfig {
+            context_window_tokens: 400,
+            ..Default::default()
+        };
+        let mut session = ChatSession::new(
+            Box::new(mock),
+            Arc::new(Mutex::new(vault)),
+            "test".into(),
+            agent_config,
+            &BrainProfile::default(),
+            &crate::prompts::UserPrompts::default(),
+        );
+
+        // A sizable user message each turn.
+        let msg = format!("tell me about {}", "rust ".repeat(40));
+        for _ in 0..40 {
+            session.send(&msg, None, None).await.unwrap();
+            // History stays bounded by the context window, however many turns run.
+            assert!(
+                estimate_messages_tokens(&session.messages)
+                    <= session.config.context_window_tokens,
+                "history must stay under the context-window budget"
+            );
+            // The kept history always begins with a fresh user turn (no orphan
+            // tool_result, valid first message for the API).
+            assert!(starts_fresh_turn(&session.messages[0]));
+        }
+        // Without compaction, 40 turns would be dozens of messages; bounded here.
+        assert!(session.messages.len() < 12);
     }
 
     #[tokio::test]

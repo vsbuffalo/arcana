@@ -675,6 +675,7 @@ async fn run_explore(
              tool calls — just write your summary."
                 .into(),
         ),
+        ..Default::default()
     };
 
     // Composite executor: project tools + read-only vault tools

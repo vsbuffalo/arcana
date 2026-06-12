@@ -13,10 +13,17 @@ use crate::util::truncate_chars;
 
 pub struct AgentConfig {
     pub max_iterations: usize,
+    /// Cumulative *spend* budget: stop once this many tokens have been billed
+    /// across the run. Distinct from `context_window_tokens` below.
     pub max_tokens: u64,
     /// Message injected into the conversation when token usage hits 75%.
     /// Tells the AI to wrap up. If None, no injection (just the log warning).
     pub wrap_up_message: Option<String>,
+    /// The model's *context-window* budget — the size of the history resent on
+    /// each call. Long multi-turn chat sessions compact older turns before this
+    /// is approached, so the resent context never grows until the model rejects
+    /// it. Separate from `max_tokens` (which caps total spend, not request size).
+    pub context_window_tokens: u64,
 }
 
 impl Default for AgentConfig {
@@ -25,6 +32,8 @@ impl Default for AgentConfig {
             max_iterations: 20,
             max_tokens: 100_000,
             wrap_up_message: None,
+            // Conservative across models; compaction keeps history well under this.
+            context_window_tokens: 200_000,
         }
     }
 }
@@ -414,6 +423,7 @@ mod tests {
             max_iterations: 20,
             max_tokens: 100, // Very small budget
             wrap_up_message: None,
+            ..Default::default()
         };
 
         let mut messages = vec![Message::user("search")];
