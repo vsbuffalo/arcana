@@ -760,7 +760,7 @@ fn print_tidy_prompts(
             task,
             None,
         );
-        println!("{prompt}");
+        println!("{}", prompt.full_text());
     }
 }
 

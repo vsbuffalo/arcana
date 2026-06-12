@@ -4,13 +4,13 @@ pub mod openai;
 use async_trait::async_trait;
 
 use crate::error::Result;
-use crate::types::{LlmResponse, Message, ToolDef};
+use crate::types::{LlmResponse, Message, SystemPrompt, ToolDef};
 
 #[async_trait]
 pub trait LlmBackend: Send + Sync {
     async fn chat(
         &self,
-        system: &str,
+        system: &SystemPrompt,
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<LlmResponse>;
@@ -91,7 +91,7 @@ pub mod mock {
     impl LlmBackend for MockBackend {
         async fn chat(
             &self,
-            _system: &str,
+            _system: &SystemPrompt,
             _messages: &[Message],
             _tools: &[ToolDef],
         ) -> Result<LlmResponse> {

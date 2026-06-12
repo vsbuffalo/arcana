@@ -79,6 +79,58 @@ pub struct ToolDef {
 }
 
 // ---------------------------------------------------------------------------
+// SystemPrompt
+// ---------------------------------------------------------------------------
+
+/// A system prompt split at the prompt-cache boundary.
+///
+/// `cached_prefix` is byte-identical across every call in a run (taxonomy +
+/// style + skill + task — and, for chat, the whole prompt). A `cache_control`
+/// breakpoint is placed at its end so backends that support prompt caching
+/// re-read it from cache on later calls. `dynamic_suffix` is the per-call tail
+/// (e.g. a note's `vault_context`) that must stay *after* the breakpoint so it
+/// never poisons the cached prefix. Backends without explicit caching just
+/// concatenate the two via [`SystemPrompt::full_text`].
+#[derive(Debug, Clone, Default)]
+pub struct SystemPrompt {
+    pub cached_prefix: String,
+    pub dynamic_suffix: String,
+}
+
+impl SystemPrompt {
+    /// A fully-static system prompt — the whole thing is cacheable.
+    pub fn cached(prefix: impl Into<String>) -> Self {
+        Self {
+            cached_prefix: prefix.into(),
+            dynamic_suffix: String::new(),
+        }
+    }
+
+    /// A static prefix followed by a per-call dynamic tail.
+    pub fn with_suffix(prefix: impl Into<String>, suffix: impl Into<String>) -> Self {
+        Self {
+            cached_prefix: prefix.into(),
+            dynamic_suffix: suffix.into(),
+        }
+    }
+
+    /// The whole prompt as one string, for backends without explicit caching.
+    pub fn full_text(&self) -> String {
+        if self.dynamic_suffix.is_empty() {
+            self.cached_prefix.clone()
+        } else if self.cached_prefix.is_empty() {
+            self.dynamic_suffix.clone()
+        } else {
+            format!("{}\n\n{}", self.cached_prefix, self.dynamic_suffix)
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.cached_prefix.is_empty() && self.dynamic_suffix.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Usage
 // ---------------------------------------------------------------------------
 

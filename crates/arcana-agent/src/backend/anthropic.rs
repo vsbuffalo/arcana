@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{retry_request, LlmBackend};
 use crate::error::{AgentError, Result};
-use crate::types::{ContentBlock, LlmResponse, Message, Role, StopReason, ToolDef, Usage};
+use crate::types::{
+    ContentBlock, LlmResponse, Message, Role, StopReason, SystemPrompt, ToolDef, Usage,
+};
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
@@ -35,10 +37,39 @@ impl AnthropicBackend {
 struct ApiRequest<'a> {
     model: &'a str,
     max_tokens: u32,
-    system: &'a str,
+    // `system` is a content-block array so a cache_control breakpoint can be
+    // placed on the static prefix. Omitted entirely when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system: Vec<SystemBlock>,
     messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
+}
+
+/// An ephemeral prompt-cache breakpoint. Caches everything from the start of the
+/// request up to and including the block it sits on (render order: tools →
+/// system → messages).
+#[derive(Serialize, Clone, Copy)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: &'static str,
+}
+
+impl CacheControl {
+    fn ephemeral() -> Self {
+        Self {
+            cache_type: "ephemeral",
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SystemBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Serialize)]
@@ -71,6 +102,8 @@ struct ApiTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 #[derive(Deserialize)]
@@ -147,6 +180,43 @@ fn to_api_message(msg: &Message) -> ApiMessage {
     ApiMessage { role, content }
 }
 
+/// Render the system prompt as content blocks, placing a cache breakpoint at the
+/// end of the static prefix. The per-call dynamic suffix follows it uncached.
+fn to_system_blocks(system: &SystemPrompt) -> Vec<SystemBlock> {
+    let mut blocks = Vec::new();
+    if !system.cached_prefix.is_empty() {
+        blocks.push(SystemBlock {
+            block_type: "text",
+            text: system.cached_prefix.clone(),
+            cache_control: Some(CacheControl::ephemeral()),
+        });
+    }
+    if !system.dynamic_suffix.is_empty() {
+        blocks.push(SystemBlock {
+            block_type: "text",
+            text: system.dynamic_suffix.clone(),
+            cache_control: None,
+        });
+    }
+    blocks
+}
+
+/// Convert tool defs, marking the *last* tool with a cache breakpoint. Tools are
+/// invariant across a run and render first, so this caches the whole tool list.
+fn to_api_tools(tools: &[ToolDef]) -> Vec<ApiTool> {
+    let last = tools.len().saturating_sub(1);
+    tools
+        .iter()
+        .enumerate()
+        .map(|(i, t)| ApiTool {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            input_schema: t.input_schema.clone(),
+            cache_control: (i == last).then(CacheControl::ephemeral),
+        })
+        .collect()
+}
+
 fn from_api_response(resp: ApiResponse) -> LlmResponse {
     let content = resp
         .content
@@ -186,26 +256,18 @@ fn from_api_response(resp: ApiResponse) -> LlmResponse {
 impl LlmBackend for AnthropicBackend {
     async fn chat(
         &self,
-        system: &str,
+        system: &SystemPrompt,
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<LlmResponse> {
         let api_messages: Vec<ApiMessage> = messages.iter().map(to_api_message).collect();
-        let api_tools: Vec<ApiTool> = tools
-            .iter()
-            .map(|t| ApiTool {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.input_schema.clone(),
-            })
-            .collect();
 
         let body = ApiRequest {
             model: &self.model,
             max_tokens: self.max_output_tokens,
-            system,
+            system: to_system_blocks(system),
             messages: api_messages,
-            tools: api_tools,
+            tools: to_api_tools(tools),
         };
 
         let body_bytes = serde_json::to_vec(&body).map_err(|e| AgentError::Llm(e.to_string()))?;
@@ -272,6 +334,54 @@ mod tests {
         let json = serde_json::to_value(&api_msg.content[0]).unwrap();
         assert_eq!(json["type"], "tool_use");
         assert_eq!(json["name"], "vault_search");
+    }
+
+    #[test]
+    fn request_body_carries_cache_breakpoint_on_static_prefix() {
+        // A per-note generate call: static prefix + dynamic vault_context suffix.
+        let system = SystemPrompt::with_suffix(
+            "<task>write a note</task>",
+            "<vault_context>existing notes</vault_context>",
+        );
+        let tools = vec![ToolDef {
+            name: "vault_search".into(),
+            description: "search".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }];
+
+        let body = ApiRequest {
+            model: "claude-sonnet-4-5",
+            max_tokens: 8192,
+            system: to_system_blocks(&system),
+            messages: vec![],
+            tools: to_api_tools(&tools),
+        };
+        let v = serde_json::to_value(&body).unwrap();
+
+        // The static prefix carries the breakpoint; the dynamic suffix does not.
+        assert_eq!(v["system"][0]["text"], "<task>write a note</task>");
+        assert_eq!(v["system"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            v["system"][1]["text"],
+            "<vault_context>existing notes</vault_context>"
+        );
+        assert!(v["system"][1].get("cache_control").is_none());
+
+        // The (invariant) tool list is cached on its last entry.
+        assert_eq!(v["tools"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn empty_system_is_omitted() {
+        let body = ApiRequest {
+            model: "claude-sonnet-4-5",
+            max_tokens: 8192,
+            system: to_system_blocks(&SystemPrompt::default()),
+            messages: vec![],
+            tools: vec![],
+        };
+        let v = serde_json::to_value(&body).unwrap();
+        assert!(v.get("system").is_none());
     }
 
     #[test]

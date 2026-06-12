@@ -9,7 +9,7 @@ use crate::error::Result;
 use crate::executor::{PermissionedExecutor, ToolExecutor};
 use crate::permissions::{chat_permissions, ApprovalResult};
 use crate::tools::{SessionContext, VaultToolExecutor};
-use crate::types::{ContentBlock, Message, StopReason, ToolDef, Usage};
+use crate::types::{ContentBlock, Message, StopReason, SystemPrompt, ToolDef, Usage};
 use crate::util::truncate_chars;
 use arcana_core::{BrainProfile, Vault};
 
@@ -31,7 +31,7 @@ pub struct ChatSession {
     vault: Arc<Mutex<Vault>>,
     messages: Vec<Message>,
     session_id: String,
-    system_prompt: String,
+    system_prompt: SystemPrompt,
     tools: Vec<ToolDef>,
     config: AgentConfig,
 }
@@ -250,7 +250,7 @@ fn build_librarian_prompt(
     taxonomy: Option<&str>,
     style: Option<&str>,
     user_prompts: &crate::prompts::UserPrompts,
-) -> String {
+) -> SystemPrompt {
     let task = user_prompts.chat.as_deref().unwrap_or(LIBRARIAN_TASK);
     crate::prompt::build_system_prompt(taxonomy, style, None, task, None)
 }

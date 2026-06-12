@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 use crate::backend::LlmBackend;
 use crate::error::Result;
 use crate::executor::ToolExecutor;
-use crate::types::{ContentBlock, Message, Role, StopReason, Usage};
+use crate::types::{ContentBlock, Message, Role, StopReason, SystemPrompt, Usage};
 use crate::util::truncate_chars;
 
 // ---------------------------------------------------------------------------
@@ -68,7 +68,7 @@ pub enum AgentEvent {
 
 pub async fn agent_loop(
     llm: &dyn LlmBackend,
-    system_prompt: &str,
+    system_prompt: &SystemPrompt,
     messages: &mut Vec<Message>,
     executor: &dyn ToolExecutor,
     config: &AgentConfig,
@@ -283,7 +283,7 @@ mod tests {
         let mut messages = vec![Message::user("search for rust")];
         let (text, usage) = agent_loop(
             &mock,
-            "you are helpful",
+            &SystemPrompt::cached("you are helpful"),
             &mut messages,
             &executor,
             &AgentConfig::default(),
@@ -340,7 +340,7 @@ mod tests {
         let mut messages = vec![Message::user("search for hello")];
         let (text, usage) = agent_loop(
             &mock,
-            "you are helpful",
+            &SystemPrompt::cached("you are helpful"),
             &mut messages,
             &executor,
             &AgentConfig::default(),
@@ -401,7 +401,14 @@ mod tests {
         };
 
         let mut messages = vec![Message::user("search")];
-        let (text, usage) = agent_loop(&mock, "", &mut messages, &executor, &config, None)
+        let (text, usage) = agent_loop(
+            &mock,
+            &SystemPrompt::default(),
+            &mut messages,
+            &executor,
+            &config,
+            None,
+        )
             .await
             .unwrap();
 

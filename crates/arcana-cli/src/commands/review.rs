@@ -444,13 +444,13 @@ async fn verify_style(
          <style_guide>\n{style_guide}\n</style_guide>"
     );
 
-    let msg = arcana_agent::Message::user(format!(
-        "<note>\n{}\n</note>",
-        &content[..content.len().min(8000)]
-    ));
+    // Truncate on a char boundary — note content routinely contains multi-byte
+    // glyphs, and byte-slicing would panic when 8000 splits a codepoint.
+    let note: String = content.chars().take(8000).collect();
+    let msg = arcana_agent::Message::user(format!("<note>\n{note}\n</note>"));
 
     let response = llm
-        .chat(&system, &[msg], &[])
+        .chat(&arcana_agent::SystemPrompt::cached(system), &[msg], &[])
         .await
         .map_err(|e| anyhow::anyhow!("style verification failed: {e}"))?;
 

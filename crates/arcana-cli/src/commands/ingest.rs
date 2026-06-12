@@ -517,7 +517,7 @@ fn print_ingest_prompts(
             task,
             None,
         );
-        println!("{prompt}");
+        println!("{}", prompt.full_text());
     }
 }
 

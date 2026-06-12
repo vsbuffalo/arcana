@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{retry_request, LlmBackend};
 use crate::error::{AgentError, Result};
-use crate::types::{ContentBlock, LlmResponse, Message, Role, StopReason, ToolDef, Usage};
+use crate::types::{
+    ContentBlock, LlmResponse, Message, Role, StopReason, SystemPrompt, ToolDef, Usage,
+};
 
 const MAX_RETRIES: u32 = 3;
 
@@ -316,11 +318,13 @@ fn from_api_response(resp: ApiResponse, provider: &str) -> Result<LlmResponse> {
 impl LlmBackend for OpenAiBackend {
     async fn chat(
         &self,
-        system: &str,
+        system: &SystemPrompt,
         messages: &[Message],
         tools: &[ToolDef],
     ) -> Result<LlmResponse> {
-        let api_messages = to_api_messages(system, messages);
+        // OpenAI-style backends have no explicit cache breakpoint (caching is
+        // automatic), so the prefix and suffix collapse into one system message.
+        let api_messages = to_api_messages(&system.full_text(), messages);
         let api_tools: Vec<ApiTool> = tools
             .iter()
             .map(|t| ApiTool {

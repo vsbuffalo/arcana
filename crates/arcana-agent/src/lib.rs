@@ -35,7 +35,7 @@ pub use tidy::{
     Unsurveyed, VaultSurveyed,
 };
 pub use tools::{SessionContext, VaultToolExecutor};
-pub use types::{ContentBlock, LlmResponse, Message, StopReason, ToolDef, Usage};
+pub use types::{ContentBlock, LlmResponse, Message, StopReason, SystemPrompt, ToolDef, Usage};
 
 use arcana_core::LlmConfig;
 
