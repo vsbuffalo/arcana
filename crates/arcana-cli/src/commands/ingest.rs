@@ -381,11 +381,17 @@ fn handle_event(event: &IngestEvent) {
             );
             eprintln!();
             eprintln!("  {} session: {}", "✓".green().bold(), session_id.cyan());
+            let cache_note = if usage.cache_read_tokens > 0 {
+                format!(" · {} cached", usage.cache_read_tokens)
+            } else {
+                String::new()
+            };
             eprintln!(
-                "  {} tokens: {} in / {} out",
+                "  {} tokens: {} in / {} out{}",
                 "✓".green().bold(),
                 usage.input_tokens,
-                usage.output_tokens
+                usage.output_tokens,
+                cache_note
             );
             eprintln!();
             eprintln!(
