@@ -624,6 +624,7 @@ pub fn estimate_generation_usage(plan: &TidyPlan, sources: &[SourceNote]) -> Usa
     Usage {
         input_tokens: est_input,
         output_tokens: est_output,
+        ..Default::default()
     }
 }
 
@@ -897,6 +898,7 @@ fn estimate_vault_generation(plan: &TidyPlan, _summaries: &[VaultNoteSummary]) -
     Usage {
         input_tokens,
         output_tokens,
+        ..Default::default()
     }
 }
 
@@ -1382,6 +1384,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 500,
                 output_tokens: 100,
+                ..Default::default()
             },
         }]);
 
@@ -1436,6 +1439,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 500,
                     output_tokens: 100,
+                    ..Default::default()
                 },
             },
             // Generate response
@@ -1447,6 +1451,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 400,
                     output_tokens: 200,
+                    ..Default::default()
                 },
             },
         ]);

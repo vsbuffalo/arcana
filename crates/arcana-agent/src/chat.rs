@@ -304,6 +304,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 50,
+                    ..Default::default()
                 },
             },
             LlmResponse {
@@ -314,6 +315,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 200,
                     output_tokens: 30,
+                    ..Default::default()
                 },
             },
         ]);
@@ -352,6 +354,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..Default::default()
                 },
             },
             LlmResponse {
@@ -362,6 +365,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..Default::default()
                 },
             },
         ]);

@@ -518,6 +518,7 @@ pub fn estimate_generation_usage(
     Usage {
         input_tokens: est_input,
         output_tokens: est_output,
+        ..Default::default()
     }
 }
 
@@ -1165,6 +1166,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 500,
                     output_tokens: 100,
+                    ..Default::default()
                 },
             },
             // Plan response
@@ -1176,6 +1178,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 300,
                     output_tokens: 80,
+                    ..Default::default()
                 },
             },
         ]);
@@ -1232,6 +1235,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 500,
                     output_tokens: 100,
+                    ..Default::default()
                 },
             },
             // Plan
@@ -1243,6 +1247,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 300,
                     output_tokens: 80,
+                    ..Default::default()
                 },
             },
             // Generate
@@ -1254,6 +1259,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 400,
                     output_tokens: 200,
+                    ..Default::default()
                 },
             },
         ]);
@@ -1309,6 +1315,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 50,
+                    ..Default::default()
                 },
             },
             // Explore iteration 2: done with summary
@@ -1320,6 +1327,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 200,
                     output_tokens: 60,
+                    ..Default::default()
                 },
             },
             // Plan
@@ -1331,6 +1339,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 20,
+                    ..Default::default()
                 },
             },
         ]);

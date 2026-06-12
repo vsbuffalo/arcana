@@ -97,6 +97,11 @@ enum ApiResponseContent {
 struct ApiUsage {
     input_tokens: u64,
     output_tokens: u64,
+    // Present only when prompt caching is in play; absent otherwise.
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -167,6 +172,8 @@ fn from_api_response(resp: ApiResponse) -> LlmResponse {
         usage: Usage {
             input_tokens: resp.usage.input_tokens,
             output_tokens: resp.usage.output_tokens,
+            cache_creation_tokens: resp.usage.cache_creation_input_tokens,
+            cache_read_tokens: resp.usage.cache_read_input_tokens,
         },
     }
 }

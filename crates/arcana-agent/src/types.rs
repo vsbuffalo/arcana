@@ -82,20 +82,40 @@ pub struct ToolDef {
 // Usage
 // ---------------------------------------------------------------------------
 
+/// Token accounting for a single request (or accumulated across a run).
+///
+/// Invariant, mirroring the Anthropic billing model: `input_tokens` counts only
+/// the *uncached* input. `cache_read_tokens` (served from the prompt cache) and
+/// `cache_creation_tokens` (written to it) are disjoint from `input_tokens` and
+/// from each other. Total prompt size = the sum of all three input components.
+/// The OpenAI backend normalizes into this shape (its `prompt_tokens` otherwise
+/// *includes* the cached portion).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Tokens written to the prompt cache this request (billed ~1.25× input).
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
+    /// Tokens served from the prompt cache this request (billed ~0.1× input).
+    #[serde(default)]
+    pub cache_read_tokens: u64,
 }
 
 impl Usage {
+    /// Total tokens processed — every input component plus output.
     pub fn total(&self) -> u64 {
-        self.input_tokens + self.output_tokens
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
     }
 
     pub fn accumulate(&mut self, other: &Usage) {
         self.input_tokens += other.input_tokens;
         self.output_tokens += other.output_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
     }
 }
 
@@ -184,6 +204,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 100,
                 output_tokens: 50,
+                ..Default::default()
             },
         };
         assert_eq!(resp.tool_calls().len(), 1);
@@ -196,10 +217,12 @@ mod tests {
         total.accumulate(&Usage {
             input_tokens: 100,
             output_tokens: 50,
+            ..Default::default()
         });
         total.accumulate(&Usage {
             input_tokens: 200,
             output_tokens: 75,
+            ..Default::default()
         });
         assert_eq!(total.input_tokens, 300);
         assert_eq!(total.output_tokens, 125);

@@ -120,6 +120,16 @@ struct ApiResponseMessage {
 struct ApiUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+    // Automatic prompt caching reports the cached subset here; `prompt_tokens`
+    // *includes* it (unlike Anthropic, where input_tokens excludes the cache).
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
 }
 
 #[derive(Deserialize)]
@@ -275,9 +285,20 @@ fn from_api_response(resp: ApiResponse, provider: &str) -> Result<LlmResponse> {
         }
     };
 
-    let usage = resp.usage.map_or(Usage::default(), |u| Usage {
-        input_tokens: u.prompt_tokens,
-        output_tokens: u.completion_tokens,
+    let usage = resp.usage.map_or(Usage::default(), |u| {
+        // Normalize to the crate-wide invariant: input_tokens is the *uncached*
+        // remainder, with the cached portion split out into cache_read_tokens.
+        let cached = u
+            .prompt_tokens_details
+            .map_or(0, |d| d.cached_tokens)
+            .min(u.prompt_tokens);
+        Usage {
+            input_tokens: u.prompt_tokens - cached,
+            output_tokens: u.completion_tokens,
+            // OpenAI auto-caches; there is no separate cache-write count.
+            cache_creation_tokens: 0,
+            cache_read_tokens: cached,
+        }
     });
 
     Ok(LlmResponse {

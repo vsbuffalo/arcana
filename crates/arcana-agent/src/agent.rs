@@ -319,6 +319,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 100,
                     output_tokens: 50,
+                    ..Default::default()
                 },
             },
             // Second response: end turn
@@ -330,6 +331,7 @@ mod tests {
                 usage: Usage {
                     input_tokens: 200,
                     output_tokens: 30,
+                    ..Default::default()
                 },
             },
         ]);
@@ -388,6 +390,7 @@ mod tests {
             usage: Usage {
                 input_tokens: 80,
                 output_tokens: 30,
+                ..Default::default()
             },
         }]);
 
