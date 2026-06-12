@@ -15,7 +15,7 @@ use crate::project_tools::ProjectToolExecutor;
 use crate::prompt::build_system_prompt;
 use crate::tools::VaultToolExecutor;
 use crate::types::{Message, Usage};
-use crate::util::{extract_json, truncate_chars};
+use crate::util::chat_for_json;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -849,23 +849,14 @@ async fn run_plan(
         },
     );
 
-    let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
-
-    let text = response.text();
-    debug!("plan response: {}", truncate_chars(&text, 500));
-
-    let json_str = extract_json(&text);
-    let plan: IngestPlan = serde_json::from_str(json_str).map_err(|e| {
-        AgentError::Llm(format!(
-            "failed to parse ingest plan JSON: {e}\n\nraw response:\n{text}"
-        ))
-    })?;
+    let (plan, usage): (IngestPlan, Usage) =
+        chat_for_json(llm, &system, user_msg, "ingest plan").await?;
 
     info!("ingest plan: {} notes", plan.notes.len());
 
     send_event(event_tx, IngestEvent::PlanReady { plan: plan.clone() });
 
-    Ok((plan, response.usage))
+    Ok((plan, usage))
 }
 
 // ---------------------------------------------------------------------------

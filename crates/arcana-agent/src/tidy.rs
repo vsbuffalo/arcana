@@ -11,7 +11,7 @@ use crate::context::generate_context;
 use crate::error::{AgentError, Result};
 use crate::prompt::build_system_prompt;
 use crate::types::{Message, Usage};
-use crate::util::{extract_json, truncate_chars};
+use crate::util::chat_for_json;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -849,17 +849,8 @@ async fn run_plan_vault(
         .unwrap_or(VAULT_PLAN_TASK);
     let system = build_system_prompt(profile.taxonomy(), profile.style(), None, task, None);
 
-    let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
-
-    let text = response.text();
-    debug!("vault plan response: {}", truncate_chars(&text, 500));
-
-    let json_str = extract_json(&text);
-    let plan: TidyPlan = serde_json::from_str(json_str).map_err(|e| {
-        AgentError::Llm(format!(
-            "failed to parse vault plan JSON: {e}\n\nraw response:\n{text}"
-        ))
-    })?;
+    let (plan, usage): (TidyPlan, Usage) =
+        chat_for_json(llm, &system, user_msg, "vault plan").await?;
 
     info!(
         "vault plan: {} actions, {} moves",
@@ -869,7 +860,7 @@ async fn run_plan_vault(
 
     send_event(event_tx, TidyEvent::PlanReady { plan: plan.clone() });
 
-    Ok((plan, response.usage))
+    Ok((plan, usage))
 }
 
 fn estimate_vault_generation(plan: &TidyPlan, _summaries: &[VaultNoteSummary]) -> Usage {
@@ -984,18 +975,8 @@ async fn run_plan_tidy(
         },
     );
 
-    let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
-
-    let text = response.text();
-    debug!("plan response: {}", truncate_chars(&text, 500));
-
-    // Parse JSON from response — strip markdown fences if present
-    let json_str = extract_json(&text);
-    let plan: TidyPlan = serde_json::from_str(json_str).map_err(|e| {
-        AgentError::Llm(format!(
-            "failed to parse tidy plan JSON: {e}\n\nraw response:\n{text}"
-        ))
-    })?;
+    let (plan, plan_usage): (TidyPlan, Usage) =
+        chat_for_json(llm, &system, user_msg, "tidy plan").await?;
 
     info!(
         "tidy plan: {} actions, {} output notes",
@@ -1005,7 +986,7 @@ async fn run_plan_tidy(
 
     send_event(event_tx, TidyEvent::PlanReady { plan: plan.clone() });
 
-    Ok((plan, response.usage))
+    Ok((plan, plan_usage))
 }
 
 // ---------------------------------------------------------------------------
