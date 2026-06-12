@@ -15,7 +15,7 @@ use crate::project_tools::ProjectToolExecutor;
 use crate::prompt::build_system_prompt;
 use crate::tools::VaultToolExecutor;
 use crate::types::{Message, Usage};
-use crate::util::extract_json;
+use crate::util::{extract_json, truncate_chars};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -851,7 +851,7 @@ async fn run_plan(
     let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
 
     let text = response.text();
-    debug!("plan response: {}", &text[..text.len().min(500)]);
+    debug!("plan response: {}", truncate_chars(&text, 500));
 
     let json_str = extract_json(&text);
     let plan: IngestPlan = serde_json::from_str(json_str).map_err(|e| {

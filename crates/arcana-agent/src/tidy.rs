@@ -11,7 +11,7 @@ use crate::context::generate_context;
 use crate::error::{AgentError, Result};
 use crate::prompt::build_system_prompt;
 use crate::types::{Message, Usage};
-use crate::util::extract_json;
+use crate::util::{extract_json, truncate_chars};
 
 // ---------------------------------------------------------------------------
 // Config
@@ -851,7 +851,7 @@ async fn run_plan_vault(
     let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
 
     let text = response.text();
-    debug!("vault plan response: {}", &text[..text.len().min(500)]);
+    debug!("vault plan response: {}", truncate_chars(&text, 500));
 
     let json_str = extract_json(&text);
     let plan: TidyPlan = serde_json::from_str(json_str).map_err(|e| {
@@ -985,7 +985,7 @@ async fn run_plan_tidy(
     let response = llm.chat(&system, &[Message::user(user_msg)], &[]).await?;
 
     let text = response.text();
-    debug!("plan response: {}", &text[..text.len().min(500)]);
+    debug!("plan response: {}", truncate_chars(&text, 500));
 
     // Parse JSON from response — strip markdown fences if present
     let json_str = extract_json(&text);

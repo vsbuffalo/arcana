@@ -10,6 +10,7 @@ use crate::executor::{PermissionedExecutor, ToolExecutor};
 use crate::permissions::{chat_permissions, ApprovalResult};
 use crate::tools::{SessionContext, VaultToolExecutor};
 use crate::types::{ContentBlock, Message, StopReason, ToolDef, Usage};
+use crate::util::truncate_chars;
 use arcana_core::{BrainProfile, Vault};
 
 /// Callback type for approval requests.
@@ -149,7 +150,7 @@ impl ChatSession {
 
                     match &result {
                         Ok(output) => {
-                            debug!("tool {name} ok: {}...", &output[..output.len().min(100)]);
+                            debug!("tool {name} ok: {}...", truncate_chars(output, 100));
 
                             // Track drafts
                             if name == "vault_draft" || name == "vault_suggest_edit" {

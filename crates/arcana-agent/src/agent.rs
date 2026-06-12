@@ -5,6 +5,7 @@ use crate::backend::LlmBackend;
 use crate::error::Result;
 use crate::executor::ToolExecutor;
 use crate::types::{ContentBlock, Message, Role, StopReason, Usage};
+use crate::util::truncate_chars;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -182,7 +183,7 @@ pub async fn agent_loop(
 
                 match result {
                     Ok(output) => {
-                        debug!("tool {name} ok: {}...", &output[..output.len().min(100)]);
+                        debug!("tool {name} ok: {}...", truncate_chars(&output, 100));
                         results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: output,
