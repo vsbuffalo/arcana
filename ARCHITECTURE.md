@@ -25,7 +25,7 @@ arcana/
 │   ├── prompt         composable system prompt assembly
 │   └── context        vault context generation for cross-linking
 │
-├── arcana-server      MCP server (JSON-RPC over stdio)
+├── arcana-server      MCP server (stdio, streamable HTTP, legacy SSE)
 ├── arcana-cli         thin clap CLI, owns all UX
 └── arcana-tui         (placeholder)
 ```
@@ -33,35 +33,35 @@ arcana/
 ## Data flow
 
 ```
-                   ┌──────────────┐
-                   │   Obsidian   │  vault/*.md on disk
-                   │    vault     │
-                   └──────┬───────┘
-                          │ index (rayon parallel, xxhash change detection)
-                   ┌──────▼───────┐
-                   │    SQLite    │  FTS5 + metadata + tags + wikilinks
-                   │   index.db   │  WAL mode, single connection
-                   └──────┬───────┘
-                          │
-             ┌────────────┼────────────┐
-             │            │            │
-       ┌─────▼─────┐ ┌───▼───┐ ┌─────▼──────┐
-       │  CLI/MCP   │ │ Chat  │ │Ingest/Tidy │
-       │  search    │ │ agent │ │ pipelines  │
-       │  read/list │ │       │ │            │
-       └────────────┘ └───┬───┘ └─────┬──────┘
-                          │           │
-                   ┌──────▼───────┐   │
-                   │ LLM Backend  │◄──┘
-                   │  anthropic   │
-                   │  openai      │
-                   │  ollama      │
-                   └──────┬───────┘
-                          │
-                   ┌──────▼───────┐
-                   │    Drafts    │  .arcana/drafts/{session}/
-                   │   staging    │  approve/reject via `arcana review`
-                   └──────────────┘
+            ┌──────────────┐
+            │   Obsidian   │  vault/*.md on disk
+            │    vault     │
+            └──────┬───────┘
+                   │ index (rayon parallel, xxhash change detection)
+            ┌──────▼───────┐
+            │    SQLite    │  FTS5 + metadata + tags + wikilinks
+            │   index.db   │  WAL mode, single connection
+            └──────┬───────┘
+                   │
+      ┌────────────┼────────────┐
+      │            │            │
+┌─────▼─────┐ ┌───▼───┐ ┌─────▼──────┐
+│  CLI/MCP   │ │ Chat  │ │Ingest/Tidy │
+│  search    │ │ agent │ │ pipelines  │
+│  read/list │ │       │ │            │
+└────────────┘ └───┬───┘ └─────┬──────┘
+                   │           │
+            ┌──────▼───────┐   │
+            │ LLM Backend  │◄──┘
+            │  anthropic   │
+            │  openai      │
+            │  ollama      │
+            └──────┬───────┘
+                   │
+            ┌──────▼───────┐
+            │    Drafts    │  .arcana/drafts/{session}/
+            │   staging    │  approve/reject via `arcana review`
+            └──────────────┘
 ```
 
 ## Config hierarchy
@@ -164,16 +164,16 @@ Each session tracks metadata and per-draft status:
 ```toml
 id = "a1b2c3d4"
 created_at = "2025-03-04T15:30:00Z"
-source = "ingest"              # ingest | tidy | chat
+source = "ingest" # ingest | tidy | chat
 provider = "anthropic"
 model = "claude-sonnet-4-5-20250929"
 task = "ingest myproject"
-input_hash = "abc123..."       # for dedup across runs
+input_hash = "abc123..." # for dedup across runs
 
 [[drafts]]
 path = "concepts/mcmc.md"
-status = "pending"             # pending | approved | rejected | edited
-kind = "new_note"              # new_note | suggest_edit
+status = "pending" # pending | approved | rejected | edited
+kind = "new_note" # new_note | suggest_edit
 ```
 
 ### Lifecycle
@@ -229,6 +229,7 @@ trait LlmBackend: Send + Sync {
 ```
 
 Three implementations:
+
 - **Anthropic**: Messages API, native tool use
 - **OpenAI**: Chat Completions API (also used for compatible providers)
 - **Ollama**: OpenAI-compatible endpoint on localhost

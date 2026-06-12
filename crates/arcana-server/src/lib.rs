@@ -1,5 +1,6 @@
 pub mod legacy_sse;
 pub mod oauth;
+pub mod rest;
 
 use std::sync::Arc;
 
@@ -560,6 +561,7 @@ pub async fn serve_stdio(vault: Vault) -> anyhow::Result<()> {
 /// Serve the MCP server over HTTP with streamable SSE (for Claude Web / remote clients).
 pub async fn serve_sse(
     vault: Vault,
+    host: String,
     port: u16,
     bearer_token: Option<String>,
     oauth_config: Option<OAuthConfig>,
@@ -606,6 +608,9 @@ pub async fn serve_sse(
         }
     });
 
+    // REST API routes (for iOS app and other HTTP clients)
+    let rest_routes = rest::api_router(vault.clone());
+
     let mcp_route = axum::Router::new()
         .route(
             "/mcp",
@@ -616,7 +621,12 @@ pub async fn serve_sse(
         )
         .route("/sse", axum::routing::get(legacy_sse::sse_handler))
         .route("/message", axum::routing::post(legacy_sse::message_handler))
-        .with_state(legacy_sse_state);
+        .with_state(legacy_sse_state)
+        .merge(rest_routes);
+
+    // Capture auth presence before the options are moved into the app below.
+    let oauth_config_present = oauth_config.is_some();
+    let bearer_token_present = bearer_token.is_some();
 
     let app = if let Some(oauth) = oauth_config {
         info!("OAuth 2.1 auth enabled for SSE transport");
@@ -669,8 +679,25 @@ pub async fn serve_sse(
         mcp_route
     };
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    info!("arcana MCP server listening on http://0.0.0.0:{port}/mcp");
+    // Fail closed: only bind a non-loopback address when auth is configured, so
+    // the default `serve --transport sse` cannot expose the vault (and, through
+    // the tools, the host filesystem) to the network unauthenticated.
+    let is_loopback = matches!(host.as_str(), "127.0.0.1" | "::1" | "localhost");
+    let auth_configured = oauth_config_present || bearer_token_present;
+    if !is_loopback && !auth_configured {
+        anyhow::bail!(
+            "refusing to bind non-loopback address '{host}' without authentication. \
+             Configure --bearer-token (ARCANA_BEARER_TOKEN) or OAuth, or bind 127.0.0.1."
+        );
+    }
+
+    let bind_addr = if host.contains(':') {
+        format!("[{host}]:{port}") // bracket IPv6 literals
+    } else {
+        format!("{host}:{port}")
+    };
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    info!("arcana MCP server listening on http://{bind_addr}/mcp");
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { ct.cancelled().await })
         .await?;
@@ -739,21 +766,34 @@ fn start_watcher(
                             }
                         }
                         _ = commit_timer.tick() => {
-                            if dirty_paths.is_empty() {
-                                continue;
-                            }
                             let vault = vault.lock().await;
                             if let Some(git) = vault.git() {
-                                match git.commit_human_change(&dirty_paths) {
-                                    Ok(Some(_)) => {
-                                        let msg = describe_changes(&dirty_paths);
-                                        info!("git: {msg}");
+                                // Adopt any untracked .md files (created outside arcana)
+                                match git.adopt_untracked() {
+                                    Ok(Some(n)) => info!("git: adopted {n} untracked notes"),
+                                    Ok(None) => {}
+                                    Err(e) => warn!("git adopt failed: {e}"),
+                                }
+
+                                // Commit accumulated dirty paths
+                                if !dirty_paths.is_empty() {
+                                    match git.commit_human_change(&dirty_paths) {
+                                        Ok(Some(_)) => {
+                                            let msg = describe_changes(&dirty_paths);
+                                            info!("git: {msg}");
+                                            dirty_paths.clear();
+                                        }
+                                        Ok(None) => {
+                                            // all AI-written, nothing to commit
+                                            dirty_paths.clear();
+                                        }
+                                        Err(e) => {
+                                            // Retain dirty_paths for retry on next tick
+                                            warn!("git commit failed: {e}");
+                                        }
                                     }
-                                    Ok(None) => {} // all AI-written
-                                    Err(e) => warn!("git commit failed: {e}"),
                                 }
                             }
-                            dirty_paths.clear();
                         }
                         else => break,
                     }

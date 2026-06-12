@@ -456,9 +456,11 @@ impl DraftManager {
     }
 
     fn validate_path(&self, rel_path: &str) -> Result<()> {
-        if rel_path.contains("..") {
-            return Err(ArcanaError::PathEscape(rel_path.to_string()));
-        }
+        // Reject absolute paths and `..` traversal, and confirm containment
+        // within the vault root. Draft targets are chosen by the AI, so an
+        // absolute path here would otherwise escape both the draft staging
+        // directory and (on approval) the vault.
+        crate::vault_path::VaultPath::resolve(&self.vault_root, rel_path)?;
         Ok(())
     }
 }

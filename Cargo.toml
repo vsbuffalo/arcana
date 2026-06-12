@@ -50,9 +50,9 @@ notify-debouncer-mini = "0.5"
 walkdir = "2"
 
 # Hashing
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-sha2 = "0.10"
 base64 = "0.22"
+sha2 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Parallelism
 rayon = "1"

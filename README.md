@@ -39,11 +39,6 @@ Then index:
 arcana index
 ```
 
-```
-Index complete
-  Scanned: 347  Added: 347  Updated: 0  Removed: 0  Unchanged: 0
-```
-
 Indexing is incremental — subsequent runs only process changed files. The index lives in `.arcana/index.db` (SQLite, gitignored by default).
 
 ### Search
@@ -69,7 +64,7 @@ Every command supports `--json` for structured output. When piped (non-TTY), out
 
 Arcana ships an MCP server so AI assistants can interact with your vault directly.
 
-### Claude Code (stdio)
+### Claude Code (local, stdio)
 
 Add to your project's `.mcp.json`:
 
@@ -84,18 +79,9 @@ Add to your project's `.mcp.json`:
 }
 ```
 
-Claude Code starts the server automatically over stdio. No network, no auth — runs locally as your user.
+No network, no auth — runs locally as your user.
 
-### Claude Code (remote, via SSE)
-
-If the server runs on another machine (e.g. behind a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)):
-
-```bash
-claude mcp add --transport sse arcana https://your-server.example.com/sse \
-  --header "Authorization: Bearer YOUR_TOKEN"
-```
-
-### Claude.ai and other MCP clients (streamable HTTP)
+### Claude.ai and other MCP clients (HTTP)
 
 Start the HTTP server:
 
@@ -103,19 +89,9 @@ Start the HTTP server:
 arcana serve --vault ~/my-vault --transport sse --port 8080
 ```
 
-Connect your client to `http://localhost:8080/mcp`. The server supports both the current [streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) transport (POST `/mcp`) and legacy SSE (GET `/sse` + POST `/message`).
+Connect your client to `http://localhost:8080/mcp`. The server supports both [streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) (`POST /mcp`) and legacy SSE (`GET /sse` + `POST /message`).
 
-### Authentication
-
-For remote deployments, the server supports OAuth 2.1 with PKCE and static bearer tokens:
-
-```bash
-arcana serve --vault ~/my-vault --transport sse --port 8080 \
-  --bearer-token "$TOKEN" \
-  --oauth-password "$PASSWORD" \
-  --oauth-client-id "$CLIENT_ID" \
-  --oauth-client-secret "$CLIENT_SECRET"
-```
+For persistent background service, authentication, and remote access, see **[docs/deployment.md](docs/deployment.md)**.
 
 ### MCP tools
 
@@ -130,11 +106,11 @@ arcana serve --vault ~/my-vault --transport sse --port 8080 \
 
 ## AI pipelines
 
-Beyond serving notes to AI assistants, Arcana includes agentic pipelines for knowledge extraction:
+Beyond serving notes to AI assistants, Arcana includes agentic pipelines for knowledge extraction. All pipelines follow a **plan-first, human-in-the-loop** workflow — AI never writes directly to your vault.
 
 ### Ingest
 
-Reads an external codebase and writes new vault notes from scratch. The AI explores the project, identifies key concepts, and produces self-contained reference notes.
+Reads an external codebase and writes new vault notes from scratch:
 
 ```bash
 arcana ingest /path/to/project --skill model-extract
@@ -142,23 +118,39 @@ arcana ingest /path/to/project --skill model-extract
 
 ### Tidy
 
-Reorganizes messy vault notes — moves, splits, extracts concepts — following your vault's taxonomy.
+Reorganizes messy vault notes — moves, splits, extracts concepts:
 
 ```bash
-arcana tidy notes/inbox/            # tidy a specific folder
-arcana tidy --audit                 # audit entire vault structure against taxonomy
+arcana tidy notes/inbox/
+arcana tidy --audit         # lightweight vault-wide structure check
 ```
 
-`--audit` is a lightweight mode that only proposes moves (no rewrites). It sends just paths and titles to the LLM, so it's cheap and fast. Use it to find misplaced notes, root-level orphans, and zone violations.
+### Review
 
-Both pipelines follow a **plan-first, human-in-the-loop** workflow:
+Approve, reject, or edit AI drafts before they enter the vault:
 
-1. AI proposes a plan (what to create/move/split)
-2. You review and edit the plan
-3. AI generates drafts to `.arcana/drafts/`
-4. `arcana review` to approve, reject, or edit each draft before it enters the vault
+```bash
+arcana review
+arcana review --verify-style   # also check against your style guide
+```
 
-AI never writes directly to your vault.
+For detailed pipeline docs, prompt overrides, and provenance tracking, see **[docs/ai-pipelines.md](docs/ai-pipelines.md)**.
+
+## Configuration
+
+```toml
+# ~/.config/arcana/config.toml
+[vault]
+path = "/path/to/your/notes"
+
+[profiles.sonnet]
+provider = "anthropic"
+model = "claude-sonnet-4-5-20250929"
+```
+
+Config merges in layers: compiled defaults → global config → vault-local config → CLI flags.
+
+For the full config reference (LLM profiles, agent settings, git provenance, brain profile), see **[docs/configuration.md](docs/configuration.md)**.
 
 ## Architecture
 

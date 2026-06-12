@@ -14,6 +14,7 @@ use crate::index::Database;
 use crate::note::{extract_inline_tags, extract_wikilinks, FileMeta, Frontmatter, Note};
 use crate::profile::BrainProfile;
 use crate::search::{SearchFilters, SearchQuery, SearchResult};
+use crate::vault_path::VaultPath;
 use crate::writer::NoteWriter;
 
 pub struct Vault {
@@ -300,13 +301,14 @@ impl Vault {
     }
 
     pub fn read_note(&self, rel_path: &str) -> Result<Note> {
-        let full_path = self.root.join(rel_path);
+        let vault_path = VaultPath::resolve(&self.root, rel_path)?;
+        let full_path = vault_path.as_path();
         if !full_path.exists() {
             return Err(ArcanaError::NoteNotFound(rel_path.to_string()));
         }
 
-        let content = std::fs::read_to_string(&full_path)?;
-        let metadata = std::fs::metadata(&full_path)?;
+        let content = std::fs::read_to_string(full_path)?;
+        let metadata = std::fs::metadata(full_path)?;
         let hash = xxhash_rust::xxh3::xxh3_64(content.as_bytes());
 
         let file_meta = FileMeta {
@@ -395,8 +397,9 @@ impl Vault {
 
     /// Write pre-built note content atomically and reindex.
     pub fn write_note_content(&self, rel_path: &str, content: &str) -> Result<()> {
-        let full_path = self.root.join(rel_path);
-        crate::writer::atomic_write(&full_path, content.as_bytes())?;
+        let vault_path = VaultPath::resolve(&self.root, rel_path)?;
+        let full_path = vault_path.as_path().to_path_buf();
+        crate::writer::atomic_write(&vault_path, content.as_bytes())?;
         self.reindex_paths(&[full_path])?;
         Ok(())
     }
@@ -411,6 +414,69 @@ impl Vault {
 
     pub fn profile(&self) -> &BrainProfile {
         &self.profile
+    }
+
+    /// Delete a note from disk and the index. Returns an error if the note doesn't exist.
+    pub fn delete_note(&self, rel_path: &str) -> Result<()> {
+        let vault_path = VaultPath::resolve(&self.root, rel_path)?;
+        let full_path = vault_path.as_path();
+        if !full_path.exists() {
+            return Err(ArcanaError::NoteNotFound(rel_path.to_string()));
+        }
+        std::fs::remove_file(full_path)?;
+        self.db.conn.execute(
+            "DELETE FROM notes WHERE path = ?1",
+            rusqlite::params![rel_path],
+        )?;
+        Ok(())
+    }
+
+    /// All tags with note counts, sorted alphabetically.
+    pub fn tags_with_counts(&self) -> Result<Vec<(String, usize)>> {
+        self.db.set_query_only(true)?;
+        let result = (|| {
+            let mut stmt = self
+                .db
+                .conn
+                .prepare("SELECT tag, COUNT(*) FROM tags GROUP BY tag ORDER BY tag")?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as usize))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })();
+        self.db.set_query_only(false)?;
+        result
+    }
+
+    /// Structured directory tree for API consumers.
+    /// Returns a list of (directory_prefix, note_count) tuples.
+    /// Every ancestor directory is included so the full hierarchy is navigable.
+    pub fn vault_tree_entries(&self) -> Result<Vec<(String, usize)>> {
+        self.db.set_query_only(true)?;
+        let result = (|| {
+            let paths = self.db.get_all_paths()?;
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+
+            for path in &paths {
+                let parts: Vec<&str> = path.split('/').collect();
+                if parts.len() < 2 {
+                    continue; // root-level files, skip
+                }
+                // Count this note in every ancestor directory.
+                // e.g. "notes/electronics/basics/file.md" counts in:
+                //   notes/, notes/electronics/, notes/electronics/basics/
+                for depth in 1..parts.len() {
+                    let prefix = parts[..depth].join("/") + "/";
+                    *counts.entry(prefix).or_insert(0) += 1;
+                }
+            }
+
+            Ok(counts.into_iter().collect())
+        })();
+        self.db.set_query_only(false)?;
+        result
     }
 
     /// Condensed directory tree (top 2 levels + note counts) from the index.

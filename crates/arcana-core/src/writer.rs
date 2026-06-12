@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::{ArcanaError, Result};
 use crate::note::{FileMeta, Frontmatter, Note};
+use crate::vault_path::VaultPath;
 
 pub struct NoteWriter {
     root: PathBuf,
@@ -37,7 +38,7 @@ impl NoteWriter {
         validate_zone(rel_path, &self.zones, &self.projects)?;
         let full_path = self.safe_path(rel_path)?;
 
-        if full_path.exists() {
+        if full_path.as_path().exists() {
             return Err(ArcanaError::NoteAlreadyExists(rel_path.to_string()));
         }
 
@@ -54,7 +55,7 @@ impl NoteWriter {
 
         let content = note.to_string();
         atomic_write(&full_path, content.as_bytes())?;
-        Ok(full_path)
+        Ok(full_path.as_path().to_path_buf())
     }
 
     pub fn update(
@@ -66,13 +67,13 @@ impl NoteWriter {
     ) -> Result<PathBuf> {
         let full_path = self.safe_path(rel_path)?;
 
-        if !full_path.exists() {
+        if !full_path.as_path().exists() {
             return Err(ArcanaError::NoteNotFound(rel_path.to_string()));
         }
 
-        let content = fs::read_to_string(&full_path)?;
+        let content = fs::read_to_string(full_path.as_path())?;
         let hash = xxhash_rust::xxh3::xxh3_64(content.as_bytes());
-        let metadata = fs::metadata(&full_path)?;
+        let metadata = fs::metadata(full_path.as_path())?;
         let file_meta = FileMeta {
             size_bytes: metadata.len(),
             modified_on_disk: metadata
@@ -97,28 +98,14 @@ impl NoteWriter {
 
         let output = note.to_string();
         atomic_write(&full_path, output.as_bytes())?;
-        Ok(full_path)
+        Ok(full_path.as_path().to_path_buf())
     }
 
-    fn safe_path(&self, rel_path: &str) -> Result<PathBuf> {
-        // Reject path traversal
-        if rel_path.contains("..") {
-            return Err(ArcanaError::PathEscape(rel_path.to_string()));
-        }
-
-        let full_path = self.root.join(rel_path);
-
-        // Canonicalize parent to check prefix
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent)?;
-            let canonical_parent = parent.canonicalize()?;
-            let canonical_root = self.root.canonicalize()?;
-            if !canonical_parent.starts_with(&canonical_root) {
-                return Err(ArcanaError::PathEscape(rel_path.to_string()));
-            }
-        }
-
-        Ok(full_path)
+    /// Validate `rel_path` against the vault root. Returns a [`VaultPath`] that is
+    /// the only kind of value [`atomic_write`] will accept, so a write cannot
+    /// reach an unvalidated path.
+    fn safe_path(&self, rel_path: &str) -> Result<VaultPath> {
+        VaultPath::resolve(&self.root, rel_path)
     }
 }
 
@@ -150,16 +137,20 @@ fn suggest_zone(rel_path: &str, projects: &[String]) -> Option<String> {
     None
 }
 
-pub(crate) fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let parent = path
+pub(crate) fn atomic_write(path: &VaultPath, data: &[u8]) -> Result<()> {
+    let full = path.as_path();
+    let parent = full
         .parent()
         .ok_or_else(|| ArcanaError::Io(std::io::Error::other("no parent directory")))?;
+    // The validated path may name a not-yet-existing subdirectory; ensure the
+    // parent exists so the same-directory temp file (and rename) can be created.
+    fs::create_dir_all(parent)?;
 
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(data)?;
     tmp.flush()?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| ArcanaError::Io(e.error))?;
+    tmp.persist(full).map_err(|e| ArcanaError::Io(e.error))?;
     Ok(())
 }
 

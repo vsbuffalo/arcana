@@ -19,7 +19,7 @@ be as long as the subject demands.
 - Short paragraphs (3-4 sentences). Bullet lists for structured info.
 - [[Wikilinks]] to related vault notes — connections > completeness
 - Code blocks for anything runnable (Python, Rust, shell)
-- LaTeX in code blocks for math: ```latex \frac{dS}{dt} = -\beta SI/N ```
+- LaTeX in code blocks for math: `latex \frac{dS}{dt} = -\beta SI/N`
 - Tables for parameter mappings, comparisons, specs
 - Headers for notes with 3+ sections; skip for short notes
 - Tags in frontmatter only. Exception: #todo inline to mark gaps.
@@ -113,7 +113,7 @@ The Price equation partitions evolutionary change into two terms:
 The first term is selection (covariance between fitness and trait).
 The second is transmission bias (how offspring deviate from parents).
 
-What makes this powerful is that it's *recursive*. You can nest it.
+What makes this powerful is that it's _recursive_. You can nest it.
 Apply Price at the group level, and the "selection" term decomposes
 into between-group selection and within-group selection. This is
 exactly the multilevel selection debate in one equation.
@@ -123,6 +123,7 @@ theorem is the special case where you drop the transmission term
 and assume additive genetic variance. Price is more general.
 
 I keep coming back to this because it shows up everywhere:
+
 - [[cultural evolution]] (memes as replicators)
 - [[epidemiological modeling]] (strain competition)
 - Even [[market selection]] (firms as units of selection)

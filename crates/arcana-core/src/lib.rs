@@ -9,6 +9,7 @@ pub mod profile;
 pub mod search;
 pub mod skill;
 pub mod vault;
+pub mod vault_path;
 pub mod watcher;
 pub mod writer;
 
@@ -25,5 +26,6 @@ pub use profile::BrainProfile;
 pub use search::{SearchFilters, SearchQuery, SearchResult};
 pub use skill::{list_skills, resolve_skill, Skill, SkillMeta, SkillSummary};
 pub use vault::{Vault, VaultStats};
+pub use vault_path::VaultPath;
 pub use watcher::{VaultWatcher, WatchEvent, WatchHandle};
 pub use writer::NoteWriter;

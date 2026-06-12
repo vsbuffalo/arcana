@@ -31,7 +31,7 @@ Takes existing messy vault notes and **reorganizes them** — moves, splits, ext
 
 ### Skills
 
-Skills are domain-specific instructions (markdown files in `.arcana/skills/`) injected into the AI system prompt. They teach the AI *how* to extract knowledge for a particular domain — e.g. a `model-extract` skill that knows how to identify model equations, parameters, and assumptions from scientific code.
+Skills are domain-specific instructions (markdown files in `.arcana/skills/`) injected into the AI system prompt. They teach the AI _how_ to extract knowledge for a particular domain — e.g. a `model-extract` skill that knows how to identify model equations, parameters, and assumptions from scientific code.
 
 Skills apply to `ingest` today (`--skill <name>`). The engine supports them for `tidy` too but the CLI doesn't expose it yet.
 

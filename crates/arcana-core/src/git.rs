@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use git2::{DiffOptions, ErrorCode, Oid, Repository, Signature, Sort, StatusOptions, StatusShow};
 use serde::Serialize;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::config::GitConfig;
 use crate::errors::{ArcanaError, Result};
@@ -284,7 +284,67 @@ impl VaultGit {
         Ok(Some(oid))
     }
 
+    /// Remove a stale `.git/index.lock` if it exists and is older than `max_age`.
+    ///
+    /// In a single-process system where all git access is serialized by a mutex,
+    /// a lock file older than a few seconds is definitionally stale — left behind
+    /// by a crash or SIGKILL. Safe to remove.
+    fn clear_stale_index_lock(&self, max_age: std::time::Duration) -> Result<()> {
+        let workdir = self.repo.workdir().unwrap_or(Path::new("."));
+        let lock_path = workdir.join(".git/index.lock");
+        if lock_path.exists() {
+            let stale = lock_path
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age > max_age);
+            if stale {
+                warn!(
+                    "removing stale index.lock (age > {}s)",
+                    max_age.as_secs()
+                );
+                std::fs::remove_file(&lock_path)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Adopt untracked `.md` files as human-authored and commit them.
+    ///
+    /// This catches files created outside arcana (by Obsidian, manual editing, etc.)
+    /// that were never `git add`ed. Returns the number of files adopted, or None
+    /// if there was nothing to adopt.
+    pub fn adopt_untracked(&self) -> Result<Option<usize>> {
+        let mut opts = StatusOptions::new();
+        opts.show(StatusShow::Workdir);
+        opts.include_untracked(true);
+        opts.recurse_untracked_dirs(true);
+
+        let statuses = self.repo.statuses(Some(&mut opts)).map_err(git_err)?;
+        let untracked: Vec<PathBuf> = statuses
+            .iter()
+            .filter(|s| s.status().contains(git2::Status::WT_NEW))
+            .filter_map(|s| s.path().map(PathBuf::from))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("md"))
+            .collect();
+
+        if untracked.is_empty() {
+            return Ok(None);
+        }
+
+        let count = untracked.len();
+        let refs: Vec<&Path> = untracked.iter().map(|p| p.as_path()).collect();
+        let msg = format!("vault: adopt {count} untracked note{}", if count == 1 { "" } else { "s" });
+        self.stage_and_commit(&refs, &msg, Author::Human)?;
+        info!("adopted {count} untracked files as human-authored");
+        Ok(Some(count))
+    }
+
     fn stage_and_commit(&self, paths: &[&Path], message: &str, author: Author) -> Result<Oid> {
+        // Clear any stale lock left behind by a crash or SIGKILL
+        self.clear_stale_index_lock(std::time::Duration::from_secs(30))?;
+
         let workdir = self
             .repo
             .workdir()
@@ -420,6 +480,9 @@ impl VaultGit {
 
     /// Line-level blame for a file.
     pub fn blame(&self, path: &str) -> Result<Vec<LineProvenance>> {
+        // `path` reaches `workdir.join(path)` and is read from disk below; reject
+        // absolute paths and `..` traversal before touching the filesystem.
+        crate::vault_path::validate_rel(path)?;
         let blame = self
             .repo
             .blame_file(Path::new(path), None)
@@ -482,6 +545,9 @@ impl VaultGit {
 
     /// Restore a file to a specific commit's version. Creates a new commit.
     pub fn restore(&self, path: &str, commit_id: &str) -> Result<Oid> {
+        // `path` reaches `workdir.join(path)` and is written below; reject
+        // absolute paths and `..` traversal before touching the filesystem.
+        crate::vault_path::validate_rel(path)?;
         let oid = Oid::from_str(commit_id)
             .map_err(|e| ArcanaError::Config(format!("invalid commit id: {e}")))?;
         let commit = self.repo.find_commit(oid).map_err(git_err)?;
@@ -782,5 +848,74 @@ mod tests {
             ProvenanceAuthor::from_email("user@example.com"),
             ProvenanceAuthor::Human
         );
+    }
+
+    #[test]
+    fn stale_lock_is_cleared_before_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config();
+        let (git, _) = VaultGit::open_or_init(dir.path(), &config).unwrap();
+
+        // Create a stale lock file with an old mtime
+        let lock_path = dir.path().join(".git/index.lock");
+        std::fs::write(&lock_path, "").unwrap();
+        // Set mtime to 60 seconds ago
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let old_filetime = std::fs::FileTimes::new().set_modified(old_time);
+        std::fs::File::options()
+            .write(true)
+            .open(&lock_path)
+            .unwrap()
+            .set_times(old_filetime)
+            .unwrap();
+
+        // Commit should succeed despite the lock file
+        std::fs::write(dir.path().join("test.md"), "content\n").unwrap();
+        let result = git.commit_ai_write(&[Path::new("test.md")], "test commit");
+        assert!(result.is_ok(), "commit should succeed after clearing stale lock");
+        assert!(!lock_path.exists(), "stale lock should have been removed");
+    }
+
+    #[test]
+    fn fresh_lock_is_not_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config();
+        let (_git, _) = VaultGit::open_or_init(dir.path(), &config).unwrap();
+
+        // Create a fresh lock file (just now)
+        let lock_path = dir.path().join(".git/index.lock");
+        std::fs::write(&lock_path, "").unwrap();
+
+        // clear_stale_index_lock with 30s threshold should NOT remove it
+        _git.clear_stale_index_lock(std::time::Duration::from_secs(30))
+            .unwrap();
+        assert!(lock_path.exists(), "fresh lock should not be removed");
+
+        // Clean up so the test doesn't leave a lock behind
+        std::fs::remove_file(&lock_path).unwrap();
+    }
+
+    #[test]
+    fn adopt_untracked_finds_new_md_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = test_config();
+        let (git, _) = VaultGit::open_or_init(dir.path(), &config).unwrap();
+
+        // Create untracked .md files after init
+        std::fs::write(dir.path().join("new-note.md"), "hello\n").unwrap();
+        std::fs::write(dir.path().join("another.md"), "world\n").unwrap();
+        // Non-md file should be ignored
+        std::fs::write(dir.path().join("ignore.txt"), "skip\n").unwrap();
+
+        let result = git.adopt_untracked().unwrap();
+        assert_eq!(result, Some(2));
+
+        // Files should now be committed
+        let blame = git.blame("new-note.md").unwrap();
+        assert_eq!(blame[0].author, ProvenanceAuthor::Human);
+
+        // Second call should find nothing
+        let result = git.adopt_untracked().unwrap();
+        assert_eq!(result, None);
     }
 }

@@ -14,6 +14,12 @@ pub struct ServeArgs {
     #[arg(short, long, default_value = "stdio")]
     pub transport: Transport,
 
+    /// Host/address to bind the SSE server to (also reads ARCANA_HOST).
+    /// Defaults to loopback; binding a non-loopback address (e.g. 0.0.0.0)
+    /// requires authentication.
+    #[arg(long, env = "ARCANA_HOST", default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Port for the SSE transport (ignored for stdio)
     #[arg(short, long, default_value = "8080")]
     pub port: u16,
@@ -66,7 +72,14 @@ pub fn run_serve(args: ServeArgs, config: ArcanaConfig) -> Result<()> {
         match args.transport {
             Transport::Stdio => arcana_server::serve_stdio(vault).await,
             Transport::Sse => {
-                arcana_server::serve_sse(vault, args.port, args.bearer_token, oauth_config).await
+                arcana_server::serve_sse(
+                    vault,
+                    args.host,
+                    args.port,
+                    args.bearer_token,
+                    oauth_config,
+                )
+                .await
             }
         }
     })
