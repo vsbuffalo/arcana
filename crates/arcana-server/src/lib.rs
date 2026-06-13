@@ -615,7 +615,13 @@ pub async fn serve_sse(
             }),
         )
         .route("/sse", axum::routing::get(legacy_sse::sse_handler))
-        .route("/message", axum::routing::post(legacy_sse::message_handler))
+        .route(
+            "/message",
+            // JSON-RPC requests are small; cap the body well under axum's 2 MB
+            // default so a single POST can't buffer an outsized payload.
+            axum::routing::post(legacy_sse::message_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024)),
+        )
         .with_state(legacy_sse_state)
         .merge(rest_routes);
 
