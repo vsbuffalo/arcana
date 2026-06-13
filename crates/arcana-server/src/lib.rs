@@ -14,9 +14,7 @@ pub use oauth::OAuthConfig;
 use rmcp::{
     handler::server::tool::ToolRouter,
     handler::server::wrapper::Parameters,
-    model::{
-        CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo, ToolsCapability,
-    },
+    model::{CallToolResult, Content, Implementation, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         session::local::LocalSessionManager, tower::StreamableHttpServerConfig,
@@ -523,22 +521,19 @@ impl ArcanaServer {
 // ServerHandler impl
 // ---------------------------------------------------------------------------
 
-#[tool_handler]
+// rmcp 1.x's #[tool_handler] defaults its router to `Self::tool_router()` (a
+// fresh router built per call); point it at the cached field instead.
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for ArcanaServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: Default::default(),
-            capabilities: ServerCapabilities {
-                tools: Some(ToolsCapability { list_changed: None }),
-                ..Default::default()
-            },
-            server_info: Implementation {
-                name: "arcana".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                ..Default::default()
-            },
-            instructions: Some(self.instructions.clone()),
-        }
+        // rmcp 1.x marks these model structs #[non_exhaustive], so they can no
+        // longer be built with a struct literal cross-crate — use the provided
+        // constructors/builders and mutate the public fields.
+        let mut info = ServerInfo::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.server_info = Implementation::new("arcana", env!("CARGO_PKG_VERSION"));
+        info.instructions = Some(self.instructions.clone());
+        info
     }
 }
 
