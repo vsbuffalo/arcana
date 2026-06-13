@@ -131,22 +131,52 @@ pub struct LineProvenanceResponse {
 // Error handling
 // ---------------------------------------------------------------------------
 
-struct ApiError(StatusCode, String);
+struct ApiError {
+    status: StatusCode,
+    /// Client-facing message — must not contain internal paths or error detail.
+    public: String,
+    /// Full detail logged server-side; never sent to the client.
+    internal: Option<String>,
+}
+
+impl ApiError {
+    fn new(status: StatusCode, public: impl Into<String>) -> Self {
+        Self {
+            status,
+            public: public.into(),
+            internal: None,
+        }
+    }
+
+    /// A 500 with a generic client message; the real cause (which may embed
+    /// filesystem paths from libgit2/IO) is logged server-side, not returned.
+    fn internal(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            public: "internal server error".into(),
+            internal: Some(detail.into()),
+        }
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
-        let body = serde_json::json!({ "error": self.1 });
-        (self.0, Json(body)).into_response()
+        if let Some(detail) = &self.internal {
+            tracing::error!(status = %self.status, "rest api error: {detail}");
+        }
+        let body = serde_json::json!({ "error": self.public });
+        (self.status, Json(body)).into_response()
     }
 }
 
 impl From<arcana_core::ArcanaError> for ApiError {
     fn from(e: arcana_core::ArcanaError) -> Self {
         match &e {
+            // The relative note path is the caller's own input — safe to echo.
             arcana_core::ArcanaError::NoteNotFound(_) => {
-                ApiError(StatusCode::NOT_FOUND, e.to_string())
+                ApiError::new(StatusCode::NOT_FOUND, e.to_string())
             }
-            _ => ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            _ => ApiError::internal(e.to_string()),
         }
     }
 }
@@ -314,22 +344,19 @@ async fn get_provenance(
 ) -> Result<Json<ProvenanceResponse>, ApiError> {
     let path = raw_path.strip_prefix('/').unwrap_or(&raw_path).to_string();
     let vault = vault.lock().await;
-    let git = vault.git().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "git not enabled".to_string(),
-        )
-    })?;
+    let git = vault
+        .git()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "git not enabled"))?;
 
     // Verify note exists before calling git blame
     vault.read_note(&path).map_err(ApiError::from)?;
 
-    let prov = git.provenance(&path).map_err(|e| {
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("provenance failed for {path}: {e}"))
-    })?;
-    let lines = git.blame(&path).map_err(|e| {
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("blame failed for {path}: {e}"))
-    })?;
+    let prov = git
+        .provenance(&path)
+        .map_err(|e| ApiError::internal(format!("provenance failed for {path}: {e}")))?;
+    let lines = git
+        .blame(&path)
+        .map_err(|e| ApiError::internal(format!("blame failed for {path}: {e}")))?;
     let line_responses: Vec<LineProvenanceResponse> = lines
         .into_iter()
         .map(|l| LineProvenanceResponse {
@@ -472,4 +499,29 @@ pub fn api_router(vault: SharedVault) -> Router {
         .route("/api/tree", get(get_tree))
         .route("/api/reindex", post(reindex))
         .with_state(vault)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_error_returns_generic_public_message() {
+        // Detail embeds a filesystem path (as libgit2/IO errors do).
+        let err = ApiError::internal("blame failed for notes/x.md: /Users/vsb/vault/.git error");
+        assert_eq!(err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        // Client message is generic — no path leaks.
+        assert_eq!(err.public, "internal server error");
+        assert!(!err.public.contains('/'));
+        // Full detail is retained for server-side logging only.
+        assert!(err.internal.as_deref().unwrap().contains("/Users/"));
+    }
+
+    #[test]
+    fn new_error_keeps_explicit_public_message() {
+        let err = ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "git not enabled");
+        assert_eq!(err.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(err.public, "git not enabled");
+        assert!(err.internal.is_none());
+    }
 }
