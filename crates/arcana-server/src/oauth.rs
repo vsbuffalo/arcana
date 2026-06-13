@@ -1,3 +1,21 @@
+//! OAuth bridge for the MCP HTTP transport.
+//!
+//! **Scope (deliberate): single user, single client, loopback-first.** Arcana is
+//! a local-first personal vault server (design goal: the vault never leaves the
+//! machine). This endpoint exists only so MCP clients that expect an OAuth dance
+//! (e.g. Claude) can authenticate *you* — there is one password and one
+//! client credential, both from the launch environment.
+//!
+//! It is **not** a multi-tenant authorization server. The `/register` endpoint
+//! is a deliberate stub: it always returns the single pre-configured `client_id`
+//! so a client can discover it, and does not implement RFC 7591 dynamic client
+//! registration despite the discovery metadata listing a `registration_endpoint`
+//! (clients require the field to be present). Multi-user / multi-client access
+//! over the network is out of scope — it would require per-user identity in the
+//! vault core, not just here, and contradicts the local-first design. The real
+//! protections are the password gate, PKCE (enforced), exact client-credential
+//! match, and binding to loopback by default.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +43,7 @@ pub struct OAuthConfig {
 }
 
 struct StoredAuthCode {
-    #[allow(dead_code)]
+    /// The redirect_uri bound at authorize time; re-checked at the token endpoint.
     redirect_uri: String,
     code_challenge: String,
     created_at: Instant,
@@ -251,7 +269,7 @@ pub struct TokenRequest {
     client_id: Option<String>,
     #[serde(default)]
     client_secret: Option<String>,
-    #[allow(dead_code)]
+    #[serde(default)]
     redirect_uri: Option<String>,
 }
 
@@ -305,6 +323,17 @@ pub async fn token(
 
     if stored.created_at.elapsed() > AUTH_CODE_TTL {
         return error_json(StatusCode::BAD_REQUEST, "invalid_grant");
+    }
+
+    // Defense-in-depth (PKCE below is the primary binding): if the client sends a
+    // redirect_uri, it must match the one bound at authorize time (RFC 6749
+    // §4.1.3). We don't *require* its presence so a client that omits it still
+    // works, but a mismatched value is rejected.
+    if let Some(req_redirect) = &form.redirect_uri {
+        if req_redirect != &stored.redirect_uri {
+            warn!("token request redirect_uri does not match authorize-time value");
+            return error_json(StatusCode::BAD_REQUEST, "invalid_grant");
+        }
     }
 
     // PKCE verification: BASE64URL(SHA256(code_verifier)) must equal code_challenge
@@ -419,10 +448,26 @@ fn extract_client_credentials(
     Some((id.to_string(), secret.to_string()))
 }
 
+/// Validate an OAuth redirect URI: HTTPS anywhere, or HTTP only to loopback.
+///
+/// The loopback check requires a delimiter (`:`, `/`, or end-of-string) right
+/// after `localhost`/`127.0.0.1` so an attacker host that merely *starts with*
+/// the loopback name — `http://localhost.evil.com` — is rejected. (A bare prefix
+/// check would accept it.)
 fn is_valid_redirect_uri(uri: &str) -> bool {
-    uri.starts_with("https://")
-        || uri.starts_with("http://localhost")
-        || uri.starts_with("http://127.0.0.1")
+    if uri.starts_with("https://") {
+        return true;
+    }
+    for host in ["http://localhost", "http://127.0.0.1"] {
+        if let Some(rest) = uri.strip_prefix(host) {
+            // Next char must end the authority, not extend the hostname.
+            match rest.chars().next() {
+                None | Some(':') | Some('/') => return true,
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 fn extract_host(headers: &axum::http::HeaderMap) -> String {
@@ -447,4 +492,30 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#x27;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redirect_uri_accepts_https_and_loopback() {
+        assert!(is_valid_redirect_uri("https://claude.ai/callback"));
+        assert!(is_valid_redirect_uri("http://localhost"));
+        assert!(is_valid_redirect_uri("http://localhost/cb"));
+        assert!(is_valid_redirect_uri("http://localhost:8080/cb"));
+        assert!(is_valid_redirect_uri("http://127.0.0.1:1234/cb"));
+    }
+
+    #[test]
+    fn redirect_uri_rejects_loopback_prefix_bypass() {
+        // Hosts that merely *start with* the loopback name must be rejected —
+        // the bug a bare prefix check would let through.
+        assert!(!is_valid_redirect_uri("http://localhost.evil.com/cb"));
+        assert!(!is_valid_redirect_uri("http://localhostevil/cb"));
+        assert!(!is_valid_redirect_uri("http://127.0.0.1.evil.com/cb"));
+        // Plain HTTP to a non-loopback host, and non-http schemes.
+        assert!(!is_valid_redirect_uri("http://evil.com/cb"));
+        assert!(!is_valid_redirect_uri("ftp://localhost/cb"));
+    }
 }
