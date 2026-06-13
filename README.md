@@ -1,10 +1,10 @@
 # Arcana
 
-Your personal knowledge base as context for AI.
+A single-user, self-hosted knowledge store that turns your own notes into live context for AI.
 
-Arcana indexes a folder of markdown notes — your research, references, project docs, ideas — and exposes them to AI assistants via [MCP](https://modelcontextprotocol.io) (Model Context Protocol). Claude, and any MCP-compatible client, can search, read, and write notes in your vault as naturally as browsing the web.
+Arcana indexes a folder of markdown notes — your research, references, project docs, ideas, the context you've accumulated over years — and exposes them to AI assistants via [MCP](https://modelcontextprotocol.io) (Model Context Protocol). Claude, and any MCP-compatible client, can search, read, and write notes in your vault mid-conversation, without copy-pasting or uploading files.
 
-It works especially well with [Obsidian](https://obsidian.md) vaults (respects frontmatter and wikilinks), but any directory of markdown files works.
+It's built for one person and one vault: a personal context store you keep, curate, and reuse — running on your own machine, not someone else's cloud. It works especially well with [Obsidian](https://obsidian.md) vaults (respects frontmatter and wikilinks), but any directory of markdown files works.
 
 ## Why
 
@@ -13,7 +13,28 @@ LLMs are powerful but context-starved. You already have a personal knowledge bas
 - **Search** — full-text search with BM25 ranking, tag/path filters, highlighted snippets
 - **Read** — pull any note's content into the conversation
 - **Write** — AI drafts new notes that land in your vault, properly formatted with frontmatter
-- **Local-first** — your notes never leave your machine (unless you choose to expose the server remotely)
+- **Local-first & private** — your notes live on your machine; the server binds to loopback by default and fail-closes rather than exposing your vault unauthenticated
+
+## Self-hosted, single-user, private
+
+Arcana is deliberately **single-user**: one owner, one vault, one set of credentials. No multi-tenancy, no per-user isolation, no accounts to manage. That constraint keeps the whole system simple and lets it run as a trustworthy, long-lived service on hardware you own.
+
+Because it's meant to run as an always-on service on your own machine, it's built to be **robust**:
+
+- Atomic writes (tmpfile → fsync → rename) — no half-written notes, no silent data loss
+- ACID via SQLite WAL; incremental indexing keyed on content hashes
+- Git-tracked provenance — every change is committed, with human vs AI authorship distinguishable per line
+
+…and **private by default**:
+
+- The HTTP server binds to loopback (`127.0.0.1`) and *fail-closes* — it refuses to bind a non-loopback address unless you've configured authentication.
+- Secrets are compared in constant time, the OAuth bridge enforces PKCE, and request bodies and session counts are bounded.
+
+### Reaching it from your other devices
+
+You don't need to put Arcana on your LAN or the public internet to use it from your phone or laptop. Keep it bound to loopback and reach it over **[Tailscale](https://tailscale.com)** — a private, encrypted, device-authenticated mesh. `tailscale serve` proxies the local port to *your tailnet only*, so the vault stays invisible to everything outside your own devices and Tailscale handles authentication for you. This is the recommended remote-access setup.
+
+If you need genuine public exposure, enable authentication (bearer token or OAuth) and front it with a tunnel. See **[docs/deployment.md](docs/deployment.md)**.
 
 ## Install
 
@@ -83,15 +104,15 @@ No network, no auth — runs locally as your user.
 
 ### Claude.ai and other MCP clients (HTTP)
 
-Start the HTTP server:
+Start the HTTP server — it binds to `127.0.0.1` by default:
 
 ```bash
-arcana serve --vault ~/my-vault --transport sse --port 8080
+arcana serve --vault ~/my-vault --transport sse --port 8787
 ```
 
-Connect your client to `http://localhost:8080/mcp`. The server supports both [streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) (`POST /mcp`) and legacy SSE (`GET /sse` + `POST /message`).
+Connect a local client to `http://localhost:8787/mcp`. The server supports both [streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) (`POST /mcp`) and legacy SSE (`GET /sse` + `POST /message`).
 
-For persistent background service, authentication, and remote access, see **[docs/deployment.md](docs/deployment.md)**.
+To use it from another device, keep it on loopback and put it on your tailnet with Tailscale (recommended), or enable authentication and bind a wider address (`--host`/`ARCANA_HOST`). For persistent background service, authentication, and remote access, see **[docs/deployment.md](docs/deployment.md)**.
 
 ### MCP tools
 

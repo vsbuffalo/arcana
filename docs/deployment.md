@@ -143,15 +143,29 @@ export ARCANA_OAUTH_PASSWORD="your-password"
 
 The OAuth flow:
 1. Client discovers endpoints via `GET /.well-known/oauth-authorization-server`
-2. Client registers dynamically via `POST /register` (or uses pre-configured credentials)
+2. Client fetches the single pre-configured client via `POST /register` — Arcana is single-user, so this returns the one static `client_id` rather than registering a new client
 3. User authorizes via browser (`GET /authorize`) — enters the password
 4. Client exchanges code for access token (`POST /token`)
 
 Both bearer token and OAuth can be active at the same time. For launchd/systemd, set all values as environment variables in the service definition.
 
-## Remote access with Cloudflare Tunnel
+## Remote access over Tailscale (recommended)
 
-To expose your local server to the internet without opening ports:
+For personal use, the cleanest way to reach Arcana from your other devices is [Tailscale](https://tailscale.com): keep the server bound to loopback and let Tailscale expose it to *your tailnet only* — encrypted end to end, authenticated by device, and invisible to your LAN and the public internet.
+
+With the server running on `127.0.0.1:8787` (the default bind), publish that port to your tailnet with `tailscale serve`:
+
+```bash
+tailscale serve --bg 8787
+```
+
+Tailscale then proxies `https://<machine>.<your-tailnet>.ts.net/` to the local port (exact flags vary by Tailscale version — see `tailscale serve --help` / status with `tailscale serve status`). Point MCP clients on your other devices at that HTTPS URL.
+
+Because requests reach Arcana over the local proxy (from loopback) and only enrolled tailnet devices can connect, you get device-level authentication at the network layer without exposing the vault. The bearer token / OAuth below is then optional defense-in-depth rather than your only gate. This keeps Arcana's fail-closed default intact: it stays bound to loopback, never to a public interface.
+
+## Public exposure with Cloudflare Tunnel
+
+If you need to reach the server from outside your tailnet, expose it to the internet without opening ports — and **enable authentication first** (see above):
 
 ```bash
 # Install cloudflared
