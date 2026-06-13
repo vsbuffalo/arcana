@@ -73,6 +73,7 @@ regex = "1"
 axum = "0.8"
 rmcp = { version = "1.4", features = ["server", "transport-io", "transport-streamable-http-server"] }
 schemars = "0.8"
+subtle = "2"
 
 # Testing
 tempfile = "3"

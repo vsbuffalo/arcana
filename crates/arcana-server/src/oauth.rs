@@ -25,6 +25,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use tracing::warn;
 
@@ -218,7 +219,7 @@ pub async fn authorize_submit(
     State(state): State<OAuthState>,
     axum::Form(form): axum::Form<AuthorizeSubmit>,
 ) -> Response {
-    if form.password != state.config.password {
+    if !ct_eq(&form.password, &state.config.password) {
         return (StatusCode::UNAUTHORIZED, "Invalid password").into_response();
     }
 
@@ -296,7 +297,11 @@ pub async fn token(
             None => return error_json(StatusCode::UNAUTHORIZED, "missing client credentials"),
         };
 
-    if client_id != state.config.client_id || client_secret != state.config.client_secret {
+    // Evaluate both before combining so the check doesn't short-circuit on the
+    // client_id and leak (via timing) whether the secret was even compared.
+    let id_ok = ct_eq(&client_id, &state.config.client_id);
+    let secret_ok = ct_eq(&client_secret, &state.config.client_secret);
+    if !(id_ok && secret_ok) {
         return error_json(StatusCode::UNAUTHORIZED, "invalid_client");
     }
 
@@ -385,7 +390,7 @@ pub async fn bearer_auth(
 
     // Accept static bearer token if configured
     if let Some(ref static_token) = state.static_bearer {
-        if token == static_token {
+        if ct_eq(token, static_token) {
             return next.run(req).await;
         }
     }
@@ -486,6 +491,13 @@ fn base_url(host: &str) -> String {
     }
 }
 
+/// Compare two secrets in constant time over their content, so an attacker
+/// can't recover a secret byte-by-byte from response-timing differences.
+/// (Length may still differ observably — that's the standard tradeoff.)
+fn ct_eq(a: &str, b: &str) -> bool {
+    a.as_bytes().ct_eq(b.as_bytes()).into()
+}
+
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -497,6 +509,14 @@ fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ct_eq_behaves_like_equality() {
+        assert!(ct_eq("hunter2", "hunter2"));
+        assert!(!ct_eq("hunter2", "hunter3"));
+        assert!(!ct_eq("short", "a-longer-secret"));
+        assert!(ct_eq("", ""));
+    }
 
     #[test]
     fn redirect_uri_accepts_https_and_loopback() {
