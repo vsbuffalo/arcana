@@ -151,6 +151,14 @@ pub(crate) fn atomic_write(path: &VaultPath, data: &[u8]) -> Result<()> {
     tmp.flush()?;
     tmp.as_file().sync_all()?;
     tmp.persist(full).map_err(|e| ArcanaError::Io(e.error))?;
+
+    // Durability: fsync the parent directory so the rename itself is persisted,
+    // not just the file contents. Without this, a crash immediately after
+    // persist() can lose the rename on some filesystems. (Directory fsync is a
+    // POSIX notion; on non-Unix the rename's durability is left to the OS.)
+    #[cfg(unix)]
+    fs::File::open(parent)?.sync_all()?;
+
     Ok(())
 }
 

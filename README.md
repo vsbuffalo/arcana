@@ -42,8 +42,9 @@ any folder of markdown files works.
   SSE); tools `vault_search` / `read` / `create` / `update` / `list` / `stats`
 - **Provenance** — every change is git-committed and AI writes use a distinct
   identity, so `git blame` attributes each line human-vs-AI (`arcana blame`)
-- **Durable** — atomic writes (tmpfile → fsync → rename) and ACID via SQLite
-  WAL: no half-written notes, no silent data loss
+- **Durable** — note writes are atomic and crash-safe (temp → fsync → rename →
+  fsync parent dir); the index is ACID via SQLite WAL. Readers never see a
+  half-written note, and a completed write survives a crash
 - **Private by default** — binds to loopback and fail-closes without auth;
   constant-time secret checks, PKCE, bounded request bodies and sessions
 - **AI pipelines** — `ingest` / `tidy` / `review`, all plan-first and
@@ -58,7 +59,18 @@ arcana-server   MCP server — stdio, streamable HTTP, legacy SSE
 arcana-cli      clap CLI — owns all user-facing output
 ```
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for details.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the system design, and
+[docs/retrieval.md](docs/retrieval.md) for how search and indexing work.
+
+## Status & limitations
+
+Alpha, and deliberately single-user — it runs as a personal service on my own
+machine, so the design assumes one trusted user rather than multi-tenancy. The
+known rough edges I haven't closed yet: the
+`ingest` and `chat` turn loops are duplicated; the filesystem watcher thread
+isn't joined on shutdown; and `LIKE` path-prefix filters don't yet escape
+`%`/`_`. Security hardening (path-traversal, OAuth/PKCE, constant-time secret
+checks, DoS bounds) is done — see the git history.
 
 ## Install
 
@@ -84,6 +96,8 @@ arcana blame  "research/attention.md"            # per-line human-vs-AI provenan
 
 `--json` on any command gives structured output; piped (non-TTY) output is plain
 paths, for `grep` / `xargs` / `fzf`.
+
+For a hands-on walkthrough with example output, see [docs/tour.md](docs/tour.md).
 
 ## MCP server
 

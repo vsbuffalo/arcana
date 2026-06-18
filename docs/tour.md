@@ -151,11 +151,11 @@ Then configure your MCP client to connect to `http://localhost:8080/mcp`.
 ## For development
 
 ```bash
-cargo test --workspace                              # 40 tests
+cargo test --workspace                              # 245 tests
 cargo clippy --workspace --all-targets -- -D warnings  # zero warnings
 ```
 
-There's a fixture vault at `tests/fixtures/small_vault/` with 9 notes covering frontmatter, wikilinks, inline tags, nested folders, custom fields, and edge cases.
+There's a fixture vault at `tests/fixtures/small_vault/` with 10 notes covering frontmatter, wikilinks, inline tags, nested folders, custom fields, and edge cases.
 
 ## Source layout
 
@@ -175,5 +175,5 @@ crates/arcana-core/src/
 crates/arcana-cli/src/
 ├── main.rs         # clap, vault auto-detection
 ├── output.rs       # colored terminal formatting
-└── commands/       # index, search, read, create, stats
+└── commands/       # one module per subcommand (search, read, create, blame, ingest, tidy, review, …)
 ```
