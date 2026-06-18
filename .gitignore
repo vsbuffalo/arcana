@@ -1,2 +1,13 @@
 /target
 .arcana/
+
+# Local tooling / scratch (not for the public repo)
+.claude/
+.envrc
+/fix.md
+/fix2.md
+/phase3.md
+/phase3-new.md
+/phase4.md
+/refactor.md
+/llvm-cov-target/

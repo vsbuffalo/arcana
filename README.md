@@ -1,40 +1,64 @@
 # Arcana
 
-A single-user, self-hosted knowledge store that turns your own notes into live context for AI.
+[![CI](https://github.com/vsbuffalo/arcana/actions/workflows/ci.yml/badge.svg)](https://github.com/vsbuffalo/arcana/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Arcana indexes a folder of markdown notes — your research, references, project docs, ideas, the context you've accumulated over years — and exposes them to AI assistants via [MCP](https://modelcontextprotocol.io) (Model Context Protocol). Claude, and any MCP-compatible client, can search, read, and write notes in your vault mid-conversation, without copy-pasting or uploading files.
+Arcana is a single-user, self-hosted knowledge store that turns your markdown
+notes directory into personal, reusable context for AI.
 
-It's built for one person and one vault: a personal context store you keep, curate, and reuse — running on your own machine, not someone else's cloud. It works especially well with [Obsidian](https://obsidian.md) vaults (respects frontmatter and wikilinks), but any directory of markdown files works.
+The central problems I had were:
 
-## Why
+ 1. **One vault, every assistant** — I wanted to be able to pull my Obsidian
+    notes into context across Claude web, Claude Code, ChatGPT, etc.
+ 2. **Provenance for free** — I wanted to enable Git to automatically handle
+    AI-vs-human provenance.
+ 3. **My machine, not the cloud** — I wanted it to run locally on my home
+    machine (behind Tailscale), rather than someone else's cloud.
+ 4. **My context, managed by me** — I wanted to own and curate my context
+    myself: I decide what goes in and how it's organized, rather than relying
+    on an opaque, automatic memory managed externally.
 
-LLMs are powerful but context-starved. You already have a personal knowledge base — years of notes, bookmarks, clipped papers, research threads. Arcana bridges the gap: your notes become live context that AI assistants can pull from mid-conversation, without copy-pasting or uploading files.
+Why? While using Anthropic's Claude to teach myself electronics, I needed a
+quick way to manage my two kinds of notes — per-project and learning-topic. I
+also wanted a lab notebook I could talk to over speech-to-text in Claude Code,
+so I could say "I measure a voltage across capacitor C3 of 9.4V, can you record
+that in my lab notebook?" or ask "how many 2k resistors do I have on hand?". I
+wanted it also to store ideas I wrote by hand, all in the same indexed store
+for context: I could then ask, "I wanted to understand Wien Bridge Oscillators
+better, do we have all the parts on hand to build one?" and Claude could access
+my parts inventory and connect it to other ideas I had.
 
-- **Search** — full-text search with BM25 ranking, tag/path filters, highlighted snippets
-- **Read** — pull any note's content into the conversation
-- **Write** — AI drafts new notes that land in your vault, properly formatted with frontmatter
-- **Local-first & private** — your notes live on your machine; the server binds to loopback by default and fail-closes rather than exposing your vault unauthenticated
+## How it works
 
-## Self-hosted, single-user, private
+Arcana indexes a directory of markdown files and exposes them to any
+[MCP](https://modelcontextprotocol.io) client — Claude, Claude Code, and others
+— which can search, read, and write notes mid-conversation. It works especially
+well with [Obsidian](https://obsidian.md) vaults (frontmatter, wikilinks), but
+any folder of markdown files works.
 
-Arcana is deliberately **single-user**: one owner, one vault, one set of credentials. No multi-tenancy, no per-user isolation, no accounts to manage. That constraint keeps the whole system simple and lets it run as a trustworthy, long-lived service on hardware you own.
+- **Search** — SQLite **FTS5** full-text with BM25 ranking, tag/path filters,
+  highlighted snippets; xxhash incremental indexing, rayon-parallel parsing
+- **MCP server** — one server, three transports (stdio, streamable HTTP, legacy
+  SSE); tools `vault_search` / `read` / `create` / `update` / `list` / `stats`
+- **Provenance** — every change is git-committed and AI writes use a distinct
+  identity, so `git blame` attributes each line human-vs-AI (`arcana blame`)
+- **Durable** — atomic writes (tmpfile → fsync → rename) and ACID via SQLite
+  WAL: no half-written notes, no silent data loss
+- **Private by default** — binds to loopback and fail-closes without auth;
+  constant-time secret checks, PKCE, bounded request bodies and sessions
+- **AI pipelines** — `ingest` / `tidy` / `review`, all plan-first and
+  human-in-the-loop; AI output lands in drafts, never the vault unreviewed
 
-Because it's meant to run as an always-on service on your own machine, it's built to be **robust**:
+Four Rust crates with clean seams:
 
-- Atomic writes (tmpfile → fsync → rename) — no half-written notes, no silent data loss
-- ACID via SQLite WAL; incremental indexing keyed on content hashes
-- Git-tracked provenance — every change is committed, with human vs AI authorship distinguishable per line
+```
+arcana-core     index, search, notes, drafts, git provenance (zero UI deps)
+arcana-agent    LLM pipelines — ingest, tidy, chat
+arcana-server   MCP server — stdio, streamable HTTP, legacy SSE
+arcana-cli      clap CLI — owns all user-facing output
+```
 
-…and **private by default**:
-
-- The HTTP server binds to loopback (`127.0.0.1`) and *fail-closes* — it refuses to bind a non-loopback address unless you've configured authentication.
-- Secrets are compared in constant time, the OAuth bridge enforces PKCE, and request bodies and session counts are bounded.
-
-### Reaching it from your other devices
-
-You don't need to put Arcana on your LAN or the public internet to use it from your phone or laptop. Keep it bound to loopback and reach it over **[Tailscale](https://tailscale.com)** — a private, encrypted, device-authenticated mesh. `tailscale serve` proxies the local port to *your tailnet only*, so the vault stays invisible to everything outside your own devices and Tailscale handles authentication for you. This is the recommended remote-access setup.
-
-If you need genuine public exposure, enable authentication (bearer token or OAuth) and front it with a tunnel. See **[docs/deployment.md](docs/deployment.md)**.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for details.
 
 ## Install
 
@@ -42,120 +66,58 @@ If you need genuine public exposure, enable authentication (bearer token or OAut
 cargo install --path crates/arcana-cli
 ```
 
-This puts an `arcana` binary in `~/.cargo/bin/`. First install takes ~15s (compiles SQLite from source).
+Puts an `arcana` binary in `~/.cargo/bin/` (first build ~15s — compiles SQLite).
 
 ## Quick start
-
-Configure your vault path:
 
 ```bash
 mkdir -p ~/.config/arcana
 echo '[vault]
 path = "/path/to/your/notes"' > ~/.config/arcana/config.toml
+
+arcana index                                     # incremental; index in .arcana/index.db
+arcana search "voltage regulator" --tag electronics
+arcana read   "research/attention.md"
+arcana create "ideas/new.md" --title "New" --tags idea --body "..."
+arcana blame  "research/attention.md"            # per-line human-vs-AI provenance
 ```
 
-Then index:
-
-```bash
-arcana index
-```
-
-Indexing is incremental — subsequent runs only process changed files. The index lives in `.arcana/index.db` (SQLite, gitignored by default).
-
-### Search
-
-```bash
-arcana search "machine learning"
-arcana search "rust" --tag programming
-arcana search "todo" --path daily/ --limit 5
-```
-
-### Read and create notes
-
-```bash
-arcana read "research/attention.md"
-arcana create "ideas/new-idea.md" --title "New Idea" --tags "idea" --body "Some thoughts"
-```
-
-### Machine-readable output
-
-Every command supports `--json` for structured output. When piped (non-TTY), output defaults to plain paths for composability with `grep`, `xargs`, `fzf`, etc.
+`--json` on any command gives structured output; piped (non-TTY) output is plain
+paths, for `grep` / `xargs` / `fzf`.
 
 ## MCP server
 
-Arcana ships an MCP server so AI assistants can interact with your vault directly.
-
-### Claude Code (local, stdio)
-
-Add to your project's `.mcp.json`:
+**Local — Claude Code (stdio).** Add to `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "arcana": {
-      "command": "arcana",
-      "args": ["serve", "--vault", "/path/to/your/vault"]
-    }
+    "arcana": { "command": "arcana", "args": ["serve", "--vault", "/path/to/vault"] }
   }
 }
 ```
 
-No network, no auth — runs locally as your user.
-
-### Claude.ai and other MCP clients (HTTP)
-
-Start the HTTP server — it binds to `127.0.0.1` by default:
+**HTTP — Claude.ai and remote clients.** Binds `127.0.0.1` by default:
 
 ```bash
 arcana serve --vault ~/my-vault --transport sse --port 8787
 ```
 
-Connect a local client to `http://localhost:8787/mcp`. The server supports both [streamable HTTP](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http) (`POST /mcp`) and legacy SSE (`GET /sse` + `POST /message`).
-
-To use it from another device, keep it on loopback and put it on your tailnet with Tailscale (recommended), or enable authentication and bind a wider address (`--host`/`ARCANA_HOST`). For persistent background service, authentication, and remote access, see **[docs/deployment.md](docs/deployment.md)**.
-
-### MCP tools
-
-| Tool | Description |
-|------|-------------|
-| `vault_search` | Full-text search with tag and path filters |
-| `vault_read` | Read a note's full content |
-| `vault_create` | Create a new note with title, tags, body |
-| `vault_update` | Update body, append text, add/remove tags |
-| `vault_list` | List notes with optional filters |
-| `vault_stats` | Vault statistics (notes, tags, links) |
+Serves streamable HTTP (`POST /mcp`) and legacy SSE (`GET /sse` + `POST /message`).
+For remote access over Tailscale, authentication, and running as a service, see
+**[docs/deployment.md](docs/deployment.md)**.
 
 ## AI pipelines
 
-Beyond serving notes to AI assistants, Arcana includes agentic pipelines for knowledge extraction. All pipelines follow a **plan-first, human-in-the-loop** workflow — AI never writes directly to your vault.
-
-### Ingest
-
-Reads an external codebase and writes new vault notes from scratch:
+Plan-first and human-in-the-loop — AI never writes directly to your vault:
 
 ```bash
-arcana ingest /path/to/project --skill model-extract
+arcana ingest /path/to/project --skill model-extract   # codebase → new notes
+arcana tidy   notes/inbox/                              # reorganize messy notes
+arcana review                                           # approve/reject AI drafts
 ```
 
-### Tidy
-
-Reorganizes messy vault notes — moves, splits, extracts concepts:
-
-```bash
-arcana tidy notes/inbox/
-arcana tidy --audit         # lightweight vault-wide structure check
-```
-
-### Review
-
-Approve, reject, or edit AI drafts before they enter the vault:
-
-```bash
-arcana review
-arcana review --verify-style   # also check against your style guide
-```
-
-For detailed pipeline docs, prompt overrides, and provenance tracking, see **[docs/ai-pipelines.md](docs/ai-pipelines.md)**.
+See **[docs/ai-pipelines.md](docs/ai-pipelines.md)**.
 
 ## Configuration
 
@@ -169,26 +131,8 @@ provider = "anthropic"
 model = "claude-sonnet-4-5-20250929"
 ```
 
-Config merges in layers: compiled defaults → global config → vault-local config → CLI flags.
-
-For the full config reference (LLM profiles, agent settings, git provenance, brain profile), see **[docs/configuration.md](docs/configuration.md)**.
-
-## Architecture
-
-```
-arcana-core       library — indexing, search, notes, drafts, git provenance
-arcana-agent      LLM integration — ingest, tidy, chat pipelines
-arcana-server     MCP server (stdio, streamable HTTP, legacy SSE)
-arcana-cli        clap CLI, owns all user-facing output
-```
-
-- SQLite FTS5 for full-text search with BM25 ranking
-- xxhash for incremental change detection
-- rayon for parallel markdown parsing
-- Atomic writes (tmpfile, fsync, rename) — no silent data loss
-- Git provenance tracking (human vs AI authorship per line via `git blame`)
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for details.
+Layered: compiled defaults → global → vault-local → CLI flags. Full reference in
+**[docs/configuration.md](docs/configuration.md)**.
 
 ## Development
 
@@ -197,7 +141,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-There's a fixture vault at `tests/fixtures/small_vault/` with test notes covering frontmatter, wikilinks, tags, nested folders, and edge cases.
+Test fixture vault at `tests/fixtures/small_vault/`.
 
 ## License
 
