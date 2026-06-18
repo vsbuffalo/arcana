@@ -466,8 +466,7 @@ mod tests {
             session.send(&msg, None, None).await.unwrap();
             // History stays bounded by the context window, however many turns run.
             assert!(
-                estimate_messages_tokens(&session.messages)
-                    <= session.config.context_window_tokens,
+                estimate_messages_tokens(&session.messages) <= session.config.context_window_tokens,
                 "history must stay under the context-window budget"
             );
             // The kept history always begins with a fresh user turn (no orphan

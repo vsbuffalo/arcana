@@ -100,8 +100,7 @@ pub fn estimate(model: &str, usage: &Usage) -> Option<f64> {
     let input = (usage.input_tokens as f64 / 1_000_000.0) * p.input_per_mtok;
     let output = (usage.output_tokens as f64 / 1_000_000.0) * p.output_per_mtok;
     let cache_read = (usage.cache_read_tokens as f64 / 1_000_000.0) * p.cache_read_per_mtok();
-    let cache_write =
-        (usage.cache_creation_tokens as f64 / 1_000_000.0) * p.cache_write_per_mtok();
+    let cache_write = (usage.cache_creation_tokens as f64 / 1_000_000.0) * p.cache_write_per_mtok();
     Some(input + output + cache_read + cache_write)
 }
 
@@ -239,7 +238,10 @@ mod tests {
         let c = estimate("claude-sonnet-4-5", &cached).unwrap();
         let f = estimate("claude-sonnet-4-5", &fresh).unwrap();
         assert!(c < f, "cache hits must be cheaper than fresh input");
-        assert!((c - f * 0.1).abs() < 1e-9, "cache read is exactly 0.1× input");
+        assert!(
+            (c - f * 0.1).abs() < 1e-9,
+            "cache read is exactly 0.1× input"
+        );
     }
 
     #[test]

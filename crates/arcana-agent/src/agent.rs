@@ -435,8 +435,8 @@ mod tests {
             &config,
             None,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         // Should have stopped due to budget
         assert!(usage.total() >= 100);

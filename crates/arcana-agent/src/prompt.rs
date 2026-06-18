@@ -69,7 +69,10 @@ mod tests {
         // cacheable prefix.
         assert!(sp.cached_prefix.contains("<task>"));
         assert!(!sp.cached_prefix.contains("<vault_context>"));
-        assert_eq!(sp.dynamic_suffix, "<vault_context>\nexisting notes\n</vault_context>");
+        assert_eq!(
+            sp.dynamic_suffix,
+            "<vault_context>\nexisting notes\n</vault_context>"
+        );
 
         // Verify order within the cached prefix: taxonomy → style → skill → task.
         let prefix = &sp.cached_prefix;

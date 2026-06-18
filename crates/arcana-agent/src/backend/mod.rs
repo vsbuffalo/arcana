@@ -42,7 +42,9 @@ fn retry_after_duration(headers: &reqwest::header::HeaderMap) -> Option<std::tim
         .trim()
         .parse()
         .ok()?;
-    Some(std::time::Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS)))
+    Some(std::time::Duration::from_secs(
+        secs.min(MAX_RETRY_AFTER_SECS),
+    ))
 }
 
 /// Retry a request up to `max_retries` times on transient failures: HTTP 429 /

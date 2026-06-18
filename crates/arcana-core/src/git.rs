@@ -300,10 +300,7 @@ impl VaultGit {
                 .and_then(|t| t.elapsed().ok())
                 .is_some_and(|age| age > max_age);
             if stale {
-                warn!(
-                    "removing stale index.lock (age > {}s)",
-                    max_age.as_secs()
-                );
+                warn!("removing stale index.lock (age > {}s)", max_age.as_secs());
                 std::fs::remove_file(&lock_path)?;
             }
         }
@@ -335,7 +332,10 @@ impl VaultGit {
 
         let count = untracked.len();
         let refs: Vec<&Path> = untracked.iter().map(|p| p.as_path()).collect();
-        let msg = format!("vault: adopt {count} untracked note{}", if count == 1 { "" } else { "s" });
+        let msg = format!(
+            "vault: adopt {count} untracked note{}",
+            if count == 1 { "" } else { "s" }
+        );
         self.stage_and_commit(&refs, &msg, Author::Human)?;
         info!("adopted {count} untracked files as human-authored");
         Ok(Some(count))
@@ -872,7 +872,10 @@ mod tests {
         // Commit should succeed despite the lock file
         std::fs::write(dir.path().join("test.md"), "content\n").unwrap();
         let result = git.commit_ai_write(&[Path::new("test.md")], "test commit");
-        assert!(result.is_ok(), "commit should succeed after clearing stale lock");
+        assert!(
+            result.is_ok(),
+            "commit should succeed after clearing stale lock"
+        );
         assert!(!lock_path.exists(), "stale lock should have been removed");
     }
 

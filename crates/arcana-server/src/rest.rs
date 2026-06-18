@@ -326,9 +326,7 @@ async fn search_notes(
     Ok(Json(response))
 }
 
-async fn get_tags(
-    State(vault): State<SharedVault>,
-) -> Result<Json<Vec<TagResponse>>, ApiError> {
+async fn get_tags(State(vault): State<SharedVault>) -> Result<Json<Vec<TagResponse>>, ApiError> {
     let vault = vault.lock().await;
     let tags = vault.tags_with_counts().map_err(ApiError::from)?;
     let response: Vec<TagResponse> = tags
@@ -377,9 +375,7 @@ async fn get_provenance(
     }))
 }
 
-async fn get_tree(
-    State(vault): State<SharedVault>,
-) -> Result<Json<Vec<TreeEntry>>, ApiError> {
+async fn get_tree(State(vault): State<SharedVault>) -> Result<Json<Vec<TreeEntry>>, ApiError> {
     let vault = vault.lock().await;
     let entries = vault.vault_tree_entries().map_err(ApiError::from)?;
     let response: Vec<TreeEntry> = entries
@@ -389,9 +385,7 @@ async fn get_tree(
     Ok(Json(response))
 }
 
-async fn reindex(
-    State(vault): State<SharedVault>,
-) -> Result<Json<serde_json::Value>, ApiError> {
+async fn reindex(State(vault): State<SharedVault>) -> Result<Json<serde_json::Value>, ApiError> {
     let vault = vault.lock().await;
     let stats = vault.index().map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({
@@ -402,9 +396,7 @@ async fn reindex(
     })))
 }
 
-async fn get_stats(
-    State(vault): State<SharedVault>,
-) -> Result<Json<StatsResponse>, ApiError> {
+async fn get_stats(State(vault): State<SharedVault>) -> Result<Json<StatsResponse>, ApiError> {
     let vault = vault.lock().await;
     let stats = vault.stats().map_err(ApiError::from)?;
     Ok(Json(StatsResponse {
@@ -489,7 +481,10 @@ fn commit_with_author(vault: &Vault, path: &str, author: &str, action: &str) {
 
 pub fn api_router(vault: SharedVault) -> Router {
     Router::new()
-        .route("/api/notes/{*path}", get(get_note).put(update_note).delete(delete_note_handler))
+        .route(
+            "/api/notes/{*path}",
+            get(get_note).put(update_note).delete(delete_note_handler),
+        )
         .route("/api/notes", post(create_note))
         .route("/api/search", post(search_notes))
         .route("/api/list", get(list_notes))

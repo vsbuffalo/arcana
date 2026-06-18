@@ -229,8 +229,8 @@ impl VaultToolExecutor {
     fn list_def() -> ToolDef {
         ToolDef {
             name: "vault_list".into(),
-            description: "List notes in the vault, optionally filtered by path prefix and/or a tag."
-                .into(),
+            description:
+                "List notes in the vault, optionally filtered by path prefix and/or a tag.".into(),
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

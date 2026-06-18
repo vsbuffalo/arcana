@@ -157,10 +157,7 @@ pub struct Usage {
 impl Usage {
     /// Total tokens processed — every input component plus output.
     pub fn total(&self) -> u64 {
-        self.input_tokens
-            + self.output_tokens
-            + self.cache_creation_tokens
-            + self.cache_read_tokens
+        self.input_tokens + self.output_tokens + self.cache_creation_tokens + self.cache_read_tokens
     }
 
     pub fn accumulate(&mut self, other: &Usage) {
