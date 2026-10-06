@@ -560,6 +560,7 @@ pub async fn serve_sse(
     port: u16,
     bearer_token: Option<String>,
     oauth_config: Option<OAuthConfig>,
+    public_hosts: Vec<String>,
 ) -> anyhow::Result<()> {
     let tree = vault.vault_tree().unwrap_or_default();
     let instructions = build_mcp_instructions(vault.profile(), &tree);
@@ -571,7 +572,10 @@ pub async fn serve_sse(
     let watcher_vault = vault.clone();
     start_watcher(vault_root, vault_config, watcher_vault);
 
-    let config = StreamableHttpServerConfig::default();
+    // Loopback is always allowed; a tunnel's public hostname must be named
+    // explicitly, or rmcp rejects its requests as possible DNS rebinding.
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts.extend(public_hosts);
     let ct = config.cancellation_token.clone();
 
     let sse_instructions = instructions.clone();

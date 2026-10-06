@@ -41,6 +41,17 @@ pub struct ServeArgs {
     /// Password for the OAuth authorization page (also reads ARCANA_OAUTH_PASSWORD).
     #[arg(long, env = "ARCANA_OAUTH_PASSWORD")]
     pub oauth_password: Option<String>,
+
+    /// Public hostname the server is reached through, e.g. a tunnel such as
+    /// arcana-mcp.example.com (also reads ARCANA_PUBLIC_HOSTS, comma-separated).
+    /// Requests whose Host header is not loopback or one of these are rejected
+    /// as possible DNS rebinding.
+    #[arg(
+        long = "public-host",
+        env = "ARCANA_PUBLIC_HOSTS",
+        value_delimiter = ','
+    )]
+    pub public_hosts: Vec<String>,
 }
 
 pub fn run_serve(args: ServeArgs, config: ArcanaConfig) -> Result<()> {
@@ -78,6 +89,7 @@ pub fn run_serve(args: ServeArgs, config: ArcanaConfig) -> Result<()> {
                     args.port,
                     args.bearer_token,
                     oauth_config,
+                    args.public_hosts,
                 )
                 .await
             }
