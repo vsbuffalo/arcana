@@ -155,6 +155,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "git2",
+ "globset",
  "notify",
  "notify-debouncer-mini",
  "rayon",

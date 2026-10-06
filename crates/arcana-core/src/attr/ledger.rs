@@ -249,14 +249,20 @@ impl Ledger {
                 };
                 (attr, true)
             }
-            None => (
-                Attribution::uniform(
-                    uuid::Uuid::new_v4().to_string(),
-                    &content,
-                    &self.outside_insertion(),
+            // No sidecar: a renamed or moved note keeps the attribution of
+            // the orphaned sidecar describing exactly this content; only a
+            // genuinely new file is an outside edit.
+            None => match self.orphan_matching(rel, &content)? {
+                Some(sc) => (sc.attribution, true),
+                None => (
+                    Attribution::uniform(
+                        uuid::Uuid::new_v4().to_string(),
+                        &content,
+                        &self.outside_insertion(),
+                    ),
+                    true,
                 ),
-                true,
-            ),
+            },
         };
         let note_type = frontmatter_field(&content, "type");
         let kind = kind_of(
@@ -362,10 +368,21 @@ impl Ledger {
         Ok(Observed::Updated { paths })
     }
 
+    fn orphan_matching(&self, rel: &str, content: &str) -> Result<Option<Sidecar>> {
+        Ok(match self.find_orphan_with(rel, content)? {
+            Some(from) => self.read_sidecar(&from)?,
+            None => None,
+        })
+    }
+
     /// An orphaned sidecar (its note is gone) describing exactly this content.
     fn find_orphan_for(&self, rel: &str) -> Result<Option<String>> {
         let content = std::fs::read_to_string(self.root.join(rel))?;
-        let hash = bytes_hash(&content);
+        self.find_orphan_with(rel, &content)
+    }
+
+    fn find_orphan_with(&self, rel: &str, content: &str) -> Result<Option<String>> {
+        let hash = bytes_hash(content);
         let attr_root = self.arcana().join("attr");
         for entry in walkdir::WalkDir::new(&attr_root).into_iter().flatten() {
             let p = entry.path();
@@ -1392,5 +1409,30 @@ mod tests {
         let spans = l.unreviewed().unwrap();
         assert_eq!(spans.len(), 3, "{spans:?}"); // frontmatter, One, Two
         assert!(spans[2].text.starts_with("## Two"));
+    }
+
+    #[test]
+    fn moved_note_keeps_attribution_without_the_watcher() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = ledger(dir.path());
+        l.agent_create(
+            None,
+            Some("textbook/a.md"),
+            "T",
+            &BTreeMap::new(),
+            Some("Agent body."),
+            None,
+            agent(),
+            None,
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("notes")).unwrap();
+        std::fs::rename(
+            dir.path().join("textbook/a.md"),
+            dir.path().join("notes/a.md"),
+        )
+        .unwrap();
+        // No observe(): an ordinary read must still find the moved note's authors.
+        assert!(classes(&l, "notes/a.md").chars().all(|c| c == 'A'));
     }
 }
