@@ -48,34 +48,6 @@ arcana ingest --show-prompt
 
 This prints the default prompt for each phase along with the file path where you can save an override (e.g. `.arcana/prompts/explore.md`).
 
-## Tidy
-
-Reorganizes existing vault notes — moves to the right zone, splits multi-topic dumps, extracts reusable concepts.
-
-```bash
-arcana tidy notes/inbox/              # tidy a specific folder
-arcana tidy notes/inbox/brain-dump.md # tidy a single note
-arcana tidy --tags unsorted           # tidy notes with a specific tag
-arcana tidy --audit                   # audit entire vault structure
-arcana tidy --show-prompt             # see/override default prompts
-```
-
-### Phases
-
-1. **Survey** — pure local I/O. Reads target notes, extracts terms, builds vault context. No LLM calls ($0).
-
-2. **Plan** — AI proposes moves, splits, and concept extractions. Outputs structured JSON. Editable in `$EDITOR`.
-
-3. **Generate** — rewrites each note following the style guide, creates drafts.
-
-### Audit mode
-
-`--audit` is a lightweight mode that only proposes moves (no rewrites). It sends just paths and titles to the LLM, so it's cheap and fast. Use it to find misplaced notes, root-level orphans, and zone violations.
-
-```bash
-arcana tidy --audit
-```
-
 ## Review
 
 All AI output lands in drafts — never directly in your vault.
@@ -121,16 +93,12 @@ Every pipeline phase has a default task prompt. You can override any of them by 
 | `explore.md` | ingest | explore |
 | `ingest-plan.md` | ingest | plan |
 | `ingest-generate.md` | ingest | generate |
-| `tidy-audit.md` | tidy | audit |
-| `tidy-plan.md` | tidy | plan |
-| `tidy-generate.md` | tidy | generate |
 | `chat.md` | chat | system prompt |
 
 Use `--show-prompt` to see the defaults:
 
 ```bash
 arcana ingest --show-prompt
-arcana tidy --show-prompt
 ```
 
 ## Provenance

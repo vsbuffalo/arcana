@@ -47,14 +47,14 @@ any folder of markdown files works.
   half-written note, and a completed write survives a crash
 - **Private by default** — binds to loopback and fail-closes without auth;
   constant-time secret checks, PKCE, bounded request bodies and sessions
-- **AI pipelines** — `ingest` / `tidy` / `review`, all plan-first and
+- **AI pipelines** — `ingest` / `review`, all plan-first and
   human-in-the-loop; AI output lands in drafts, never the vault unreviewed
 
 Four Rust crates with clean seams:
 
 ```
 arcana-core     index, search, notes, drafts, git provenance (zero UI deps)
-arcana-agent    LLM pipelines — ingest, tidy, chat
+arcana-agent    LLM pipelines — ingest, chat
 arcana-server   MCP server — stdio, streamable HTTP, legacy SSE
 arcana-cli      clap CLI — owns all user-facing output
 ```
@@ -127,7 +127,6 @@ Plan-first and human-in-the-loop — AI never writes directly to your vault:
 
 ```bash
 arcana ingest /path/to/project --skill model-extract   # codebase → new notes
-arcana tidy   notes/inbox/                              # reorganize messy notes
 arcana review                                           # approve/reject AI drafts
 ```
 

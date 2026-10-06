@@ -162,37 +162,6 @@ impl DraftManager {
         Ok(())
     }
 
-    /// Create a move/merge draft: on approve, source note is deleted.
-    pub fn create_move_draft(
-        &self,
-        session_id: &str,
-        rel_path: &str,
-        content: &str,
-        source_path: &str,
-    ) -> Result<()> {
-        self.validate_path(rel_path)?;
-        validate_zone(rel_path, &self.zones, &self.projects)?;
-
-        let draft_path = self.draft_file_path(session_id, rel_path);
-        if let Some(parent) = draft_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(&draft_path, content)?;
-
-        let mut manifest = self.read_manifest(session_id)?;
-        manifest.drafts.push(DraftEntry {
-            path: rel_path.to_string(),
-            status: DraftStatus::Pending,
-            kind: DraftKind::Move,
-            reason: None,
-            original_path: Some(source_path.to_string()),
-        });
-        self.write_manifest(session_id, &manifest)?;
-
-        debug!("created move draft {source_path} → {rel_path} in session {session_id}");
-        Ok(())
-    }
-
     /// Suggest an edit to an existing vault note.
     pub fn suggest_edit(
         &self,

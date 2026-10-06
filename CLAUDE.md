@@ -25,15 +25,11 @@ Arcana's AI features follow a plan-first, human-in-the-loop workflow. Planning i
 
 Reads an external codebase and **authors new knowledge notes from scratch**. The AI explores the project, understands its architecture and concepts, then writes self-contained vault notes. Source material is code; output is explanatory notes.
 
-### Tidy (inbox → structured notes)
-
-Takes existing messy vault notes and **reorganizes them** — moves, splits, extracts concepts. The AI reads the source notes and rewrites them into the vault's taxonomy. Source material is vault notes; output is restructured vault notes.
-
 ### Skills
 
 Skills are domain-specific instructions (markdown files in `.arcana/skills/`) injected into the AI system prompt. They teach the AI _how_ to extract knowledge for a particular domain — e.g. a `model-extract` skill that knows how to identify model equations, parameters, and assumptions from scientific code.
 
-Skills apply to `ingest` today (`--skill <name>`). The engine supports them for `tidy` too but the CLI doesn't expose it yet.
+Skills apply to `ingest` today (`--skill <name>`).
 
 ### Review
 

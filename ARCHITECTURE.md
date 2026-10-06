@@ -18,7 +18,6 @@ arcana/
 │   ├── backend/       LlmBackend trait + anthropic, openai, ollama
 │   ├── chat           multi-turn chat session with tool use
 │   ├── ingest         explore → plan → generate pipeline
-│   ├── tidy           survey → plan → generate pipeline
 │   ├── pricing        cost estimation per model
 │   ├── tools          vault tool executor (search, read, draft)
 │   ├── project_tools  external project tools (tree, read, search)
@@ -46,7 +45,7 @@ arcana/
       ┌────────────┼────────────┐
       │            │            │
 ┌─────▼─────┐ ┌───▼───┐ ┌─────▼──────┐
-│  CLI/MCP   │ │ Chat  │ │Ingest/Tidy │
+│  CLI/MCP   │ │ Chat  │ │   Ingest   │
 │  search    │ │ agent │ │ pipelines  │
 │  read/list │ │       │ │            │
 └────────────┘ └───┬───┘ └─────┬──────┘
@@ -101,28 +100,12 @@ plan listing notes to create, their paths, titles, and source files.
 and generates formatted markdown with frontmatter, wikilinks, and AI
 provenance metadata.
 
-### Tidy: survey → plan → generate
-
-```
-┌───────────┐     ┌───────────┐     ┌───────────┐
-│  Survey   │────▸│   Plan    │────▸│ Generate  │
-│  (local)  │     │ (single)  │     │  (batch)  │
-└───────────┘     └───────────┘     └───────────┘
- read notes        JSON output       1 call/note
- extract terms     move/split/       rewrite content
- build context     extract actions   inject AI meta
- $0 (no LLM)                        create drafts
-```
-
-Survey is pure local I/O. Plan decides how to route notes (move, split,
-extract concepts). Generate rewrites each note following the style guide.
-
 ### Engine API
 
-Both pipelines expose a phased engine struct (`IngestEngine`, `TidyEngine`)
+The pipeline exposes a phased engine struct (`IngestEngine`)
 where each phase is a separate method returning a typed result. The CLI
 creates the engine, calls phases sequentially, and owns the interactive
-prompt between plan and generate. `run_ingest()` / `run_tidy()` are thin
+prompt between plan and generate. `run_ingest()` is a thin
 convenience wrappers that call all phases — used by tests and `--auto`.
 
 ### Phase control
@@ -164,7 +147,7 @@ Each session tracks metadata and per-draft status:
 ```toml
 id = "a1b2c3d4"
 created_at = "2025-03-04T15:30:00Z"
-source = "ingest" # ingest | tidy | chat
+source = "ingest" # ingest | chat | mcp
 provider = "anthropic"
 model = "claude-sonnet-4-5-20250929"
 task = "ingest myproject"
@@ -204,7 +187,7 @@ in `$EDITOR`, with helpful error messages and automatic editor reopen.
 
 ### Conflict detection
 
-Before generating drafts, both ingest and tidy call `find_conflicts()`
+Before generating drafts, ingest calls `find_conflicts()`
 to check for pending sessions targeting the same output paths. Duplicate
 runs are detected via `input_hash`.
 

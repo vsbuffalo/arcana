@@ -175,5 +175,5 @@ crates/arcana-core/src/
 crates/arcana-cli/src/
 ├── main.rs         # clap, vault auto-detection
 ├── output.rs       # colored terminal formatting
-└── commands/       # one module per subcommand (search, read, create, blame, ingest, tidy, review, …)
+└── commands/       # one module per subcommand (search, read, create, blame, ingest, review, ledger, …)
 ```

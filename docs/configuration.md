@@ -89,9 +89,6 @@ default_tags = ["ai-generated"]
 # max_explore_iterations = 15
 profile = "opus"          # use a different LLM profile for ingest
 
-[agent.tidy]
-# profile = "sonnet"
-
 # ─── Git ──────────────────────────────────────────────────────────────
 [git]
 enabled = true
@@ -119,7 +116,7 @@ retention_days = 30       # auto-prune resolved sessions after this many days
 When arcana needs an LLM, it resolves the profile in this order (later wins):
 
 1. `default_profile` from config
-2. Per-operation default: `[agent.ingest].profile` or `[agent.tidy].profile`
+2. Per-operation default: `[agent.ingest].profile`
 3. `--profile` CLI flag or `ARCANA_PROFILE` env var
 4. `--provider` / `--model` CLI flags (override individual fields)
 
@@ -148,9 +145,6 @@ Your vault's "brain profile" lives in the vault itself:
     ├── explore.md
     ├── ingest-plan.md
     ├── ingest-generate.md
-    ├── tidy-audit.md
-    ├── tidy-plan.md
-    ├── tidy-generate.md
     └── chat.md
 ```
 
@@ -160,7 +154,7 @@ Your vault's "brain profile" lives in the vault itself:
 
 **Skills** are domain-specific instructions loaded with `--skill <name>` during ingest.
 
-**Prompts** override the default task prompts for each pipeline phase. Use `arcana ingest --show-prompt` or `arcana tidy --show-prompt` to see the defaults and their save paths.
+**Prompts** override the default task prompts for each pipeline phase. Use `arcana ingest --show-prompt` to see the defaults and their save paths.
 
 ## Environment variables
 

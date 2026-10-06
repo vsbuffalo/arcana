@@ -51,7 +51,7 @@ const WORKFLOWS_HELP: &str = "\
 
 \x1b[1mLegacy vaults:\x1b[0m
 
-  ingest, tidy and chat run plan-first AI pipelines that write drafts to
+  ingest and chat run plan-first AI pipelines that write drafts to
   .arcana/drafts/<session>/, approved with `arcana review`. blame shows
   line-level attribution from git commit authors. These commands refuse
   ledger vaults, where only planned edits may write.

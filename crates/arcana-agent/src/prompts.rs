@@ -12,9 +12,6 @@ use tracing::debug;
 /// ├── explore.md          # ingest: codebase exploration
 /// ├── ingest-plan.md      # ingest: note planning
 /// ├── ingest-generate.md  # ingest: note generation
-/// ├── tidy-plan.md        # tidy: reorganization planning
-/// ├── tidy-generate.md    # tidy: note rewriting
-/// ├── tidy-audit.md       # tidy --audit: structural audit
 /// └── chat.md             # interactive chat / librarian
 /// ```
 #[derive(Debug, Clone, Default)]
@@ -22,9 +19,6 @@ pub struct UserPrompts {
     pub explore: Option<String>,
     pub ingest_plan: Option<String>,
     pub ingest_generate: Option<String>,
-    pub tidy_plan: Option<String>,
-    pub tidy_generate: Option<String>,
-    pub tidy_audit: Option<String>,
     pub chat: Option<String>,
 }
 
@@ -40,9 +34,6 @@ impl UserPrompts {
             explore: read_optional(&dir.join("explore.md")),
             ingest_plan: read_optional(&dir.join("ingest-plan.md")),
             ingest_generate: read_optional(&dir.join("ingest-generate.md")),
-            tidy_plan: read_optional(&dir.join("tidy-plan.md")),
-            tidy_generate: read_optional(&dir.join("tidy-generate.md")),
-            tidy_audit: read_optional(&dir.join("tidy-audit.md")),
             chat: read_optional(&dir.join("chat.md")),
         };
 
@@ -50,9 +41,6 @@ impl UserPrompts {
             &prompts.explore,
             &prompts.ingest_plan,
             &prompts.ingest_generate,
-            &prompts.tidy_plan,
-            &prompts.tidy_generate,
-            &prompts.tidy_audit,
             &prompts.chat,
         ]
         .iter()

@@ -10,7 +10,6 @@ pub mod pricing;
 pub mod project_tools;
 pub mod prompt;
 pub mod prompts;
-pub mod tidy;
 pub mod tools;
 pub mod types;
 pub(crate) mod util;
@@ -30,10 +29,6 @@ pub use pricing::CostEstimate;
 pub use project_tools::ProjectToolExecutor;
 pub use prompt::build_system_prompt;
 pub use prompts::UserPrompts;
-pub use tidy::{
-    run_tidy_auto, SourceNote, Tidy, TidyConfig, TidyDone, TidyEvent, TidyPlan, TidyPlanned,
-    Unsurveyed, VaultSurveyed,
-};
 pub use tools::{SessionContext, VaultToolExecutor};
 pub use types::{ContentBlock, LlmResponse, Message, StopReason, SystemPrompt, ToolDef, Usage};
 

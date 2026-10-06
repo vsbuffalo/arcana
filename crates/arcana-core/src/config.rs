@@ -201,7 +201,6 @@ pub struct AgentSettings {
     pub max_output_tokens: usize,
     pub default_tags: Vec<String>,
     pub ingest: OperationOverrides,
-    pub tidy: OperationOverrides,
 }
 
 impl Default for AgentSettings {
@@ -212,7 +211,6 @@ impl Default for AgentSettings {
             max_output_tokens: 8192,
             default_tags: vec!["ai-generated".to_string()],
             ingest: OperationOverrides::default(),
-            tidy: OperationOverrides::default(),
         }
     }
 }
@@ -598,7 +596,6 @@ mod tests {
         assert_eq!(llm.model, "claude-sonnet-4-5-20250929");
         assert_eq!(config.agent.max_tokens, 300000);
         assert_eq!(config.agent.ingest.max_tokens, Some(500000));
-        assert_eq!(config.agent.tidy.max_tokens, None);
     }
 
     #[test]

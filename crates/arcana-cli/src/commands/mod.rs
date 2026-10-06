@@ -15,7 +15,6 @@ pub mod search;
 pub mod serve;
 pub mod skills;
 pub mod stats;
-pub mod tidy;
 
 use anyhow::Result;
 use arcana_core::ArcanaConfig;
@@ -49,8 +48,6 @@ pub enum Commands {
     Diff(diff::DiffArgs),
     /// Restore a note to a previous version, with its original authorship
     Restore(restore::RestoreArgs),
-    /// Reorganize notes into drafts — move, split, extract concepts (legacy vaults)
-    Tidy(tidy::TidyArgs),
     /// Ingest an external project into draft notes using an LLM (legacy vaults)
     Ingest(ingest::IngestArgs),
     /// List available skills from .arcana/skills/
@@ -79,7 +76,6 @@ impl Commands {
             Commands::Log(args) => log::run_log(args, config, json),
             Commands::Diff(args) => diff::run_diff(args, config, json),
             Commands::Restore(args) => restore::run_restore(args, config, json),
-            Commands::Tidy(args) => tidy::run_tidy(args, config, profile),
             Commands::Ingest(args) => ingest::run_ingest(args, config, profile),
             Commands::Skills(args) => skills::run_skills(args, config, json),
             Commands::Ledger(args) => ledger::run_ledger(args, config, json),
