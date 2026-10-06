@@ -35,6 +35,13 @@ pub struct IngestArgs {
 }
 
 pub fn run_ingest(args: IngestArgs, config: ArcanaConfig, profile: Option<String>) -> Result<()> {
+    if config.ledger.enabled {
+        anyhow::bail!(
+            "{} writes drafts and notes directly, which a ledger vault does not allow; \
+             ask an agent over MCP instead",
+            "ingest"
+        );
+    }
     let vault = arcana_core::Vault::open(config.clone())?;
     crate::output::print_git_init_info(&vault);
     vault.index()?;

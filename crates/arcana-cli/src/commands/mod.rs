@@ -29,17 +29,17 @@ pub enum Commands {
     Search(search::SearchArgs),
     /// Read a note's content
     Read(read::ReadArgs),
-    /// Create a new note
+    /// Create a new note (credited to you, like an edit in your editor)
     Create(create::CreateArgs),
     /// Show vault statistics
     Stats,
     /// Start the MCP server (for Claude Code / Claude Web)
     Serve(serve::ServeArgs),
-    /// Interactive chat with your vault using an LLM
+    /// Interactive chat with your vault using an LLM (legacy vaults)
     Chat(chat::ChatArgs),
-    /// Review and approve/reject AI-generated drafts
+    /// Review agent changes (ledger vault: interactive TUI) or AI drafts (legacy vault)
     Review(review::ReviewArgs),
-    /// Show line-level provenance (human vs AI) for a note
+    /// Show who wrote a note: each word (ledger vault) or each line from git (legacy vault)
     Blame(blame::BlameArgs),
     /// Generate a context block from vault search for use with LLMs
     Context(context::ContextArgs),
@@ -47,11 +47,11 @@ pub enum Commands {
     Log(log::LogArgs),
     /// Show uncommitted changes for a note
     Diff(diff::DiffArgs),
-    /// Restore a note to a previous version
+    /// Restore a note to a previous version, with its original authorship
     Restore(restore::RestoreArgs),
-    /// Reorganize existing vault notes — move, split, and extract concepts
+    /// Reorganize notes into drafts — move, split, extract concepts (legacy vaults)
     Tidy(tidy::TidyArgs),
-    /// Ingest an external project into vault notes using an LLM
+    /// Ingest an external project into draft notes using an LLM (legacy vaults)
     Ingest(ingest::IngestArgs),
     /// List available skills from .arcana/skills/
     Skills(skills::SkillsArgs),

@@ -66,6 +66,13 @@ pub struct TidyArgs {
 }
 
 pub fn run_tidy(args: TidyArgs, config: ArcanaConfig, profile: Option<String>) -> Result<()> {
+    if config.ledger.enabled {
+        anyhow::bail!(
+            "{} writes drafts and notes directly, which a ledger vault does not allow; \
+             ask an agent over MCP instead",
+            "tidy"
+        );
+    }
     if args.show_prompt {
         let vault = arcana_core::Vault::open(config.clone())?;
         vault.index()?;

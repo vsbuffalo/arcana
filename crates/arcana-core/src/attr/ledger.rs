@@ -875,6 +875,70 @@ impl Ledger {
         self.commit(git, paths, &msg, true)
     }
 
+    /// Create a note from outside the agent path (the `arcana create` CLI).
+    /// Its words are attributed exactly like an edit made in an editor: the
+    /// human's while the write boundary holds, unattributed otherwise.
+    pub fn create_outside(
+        &self,
+        rel: &str,
+        content: &str,
+        git: Option<&VaultGit>,
+    ) -> Result<Option<String>> {
+        let _lock = self.lock()?;
+        let vp = VaultPath::resolve(&self.root, rel)?;
+        if vp.as_path().exists() {
+            return Err(ArcanaError::NoteAlreadyExists(rel.to_string()));
+        }
+        let attr = Attribution::uniform(
+            uuid::Uuid::new_v4().to_string(),
+            content,
+            &self.outside_insertion(),
+        );
+        let paths = self.persist(rel, content, &attr)?;
+        Ok(self.commit_observed(&paths, git))
+    }
+
+    /// Restore a note and its attribution to an earlier commit. Restored words
+    /// get back the authors they had then; nothing is re-credited to whoever
+    /// restored them. A note that predates the ledger at that commit is
+    /// restored as unattributed.
+    pub fn restore(&self, rel: &str, commit: &str, git: &VaultGit) -> Result<Option<String>> {
+        let _lock = self.lock()?;
+        let content = git
+            .file_at(rel, commit)?
+            .ok_or_else(|| ArcanaError::NoteNotFound(format!("{rel} at {commit}")))?;
+        let content = String::from_utf8(content)
+            .map_err(|_| ArcanaError::Ledger(format!("{rel} at {commit} is not UTF-8")))?;
+        let sidecar = git
+            .file_at(&Self::sidecar_rel(rel), commit)?
+            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|t| Sidecar::parse(&t).ok())
+            .filter(|sc| sc.matches(&content));
+        let attr = match sidecar {
+            Some(sc) => sc.attribution,
+            None => Attribution::uniform(
+                uuid::Uuid::new_v4().to_string(),
+                &content,
+                &Insertion {
+                    author: Author::Unattributed,
+                    origin: Origin::Composed,
+                    unreviewed: false,
+                    policy: None,
+                },
+            ),
+        };
+        let paths = self.persist(rel, &content, &attr)?;
+        Ok(self.commit(
+            Some(git),
+            &paths,
+            &format!(
+                "arcana: restore {rel} to {}",
+                &commit[..commit.len().min(8)]
+            ),
+            true,
+        ))
+    }
+
     /// Start tracking an existing note with an explicit, non-human author.
     pub fn import(
         &self,

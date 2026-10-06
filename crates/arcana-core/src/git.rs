@@ -640,6 +640,33 @@ impl VaultGit {
         })
     }
 
+    /// A file's content at a commit, if it existed there.
+    pub fn file_at(&self, path: &str, commit_id: &str) -> Result<Option<Vec<u8>>> {
+        crate::vault_path::validate_rel(path)?;
+        let oid = self
+            .repo
+            .revparse_single(commit_id)
+            .map_err(|e| ArcanaError::Config(format!("invalid commit {commit_id}: {e}")))?
+            .peel_to_commit()
+            .map_err(git_err)?
+            .id();
+        let tree = self
+            .repo
+            .find_commit(oid)
+            .and_then(|c| c.tree())
+            .map_err(git_err)?;
+        match tree.get_path(Path::new(path)) {
+            Ok(entry) => Ok(Some(
+                self.repo
+                    .find_blob(entry.id())
+                    .map_err(git_err)?
+                    .content()
+                    .to_vec(),
+            )),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Restore a file to a specific commit's version. Creates a new commit.
     pub fn restore(&self, path: &str, commit_id: &str) -> Result<Oid> {
         // `path` reaches `workdir.join(path)` and is written below; reject

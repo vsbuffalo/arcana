@@ -10,90 +10,64 @@ use tracing_subscriber::EnvFilter;
 use commands::Commands;
 
 const WORKFLOWS_HELP: &str = "\
-\x1b[1mWorkflows:\x1b[0m
+\x1b[1mTwo kinds of vault:\x1b[0m
 
-  All AI pipelines follow the same pattern: plan first, generate second.
-  Planning is cheap ($0.30-0.50), generation is expensive ($2-5).
-  You always see what you'll get and what it costs before committing.
+  A \x1b[1mledger vault\x1b[0m ([ledger] enabled = true) records who wrote every
+  word. Agents write only through planned edits over MCP; your words
+  can only receive suggestions; you review agent changes in a terminal
+  UI. A \x1b[1mlegacy vault\x1b[0m keeps the older model: agents write notes
+  directly, AI pipelines produce drafts, git commit authors stand in
+  for authorship.
 
-  \x1b[4mIngest (external project → vault notes)\x1b[0m
+\x1b[1mLedger vaults:\x1b[0m
 
-    arcana ingest ~/code/my-project
-    arcana ingest ~/code/my-project --skill model-extract
+  \x1b[4mSet up\x1b[0m
 
-    Reads an external codebase and authors new knowledge notes from
-    scratch. The AI explores the project (tree, README, source files),
-    understands its architecture and key concepts, then writes
-    self-contained vault notes. Source material is code; output is
-    explanatory notes — not copy-paste, but synthesized understanding.
+    arcana --vault ~/vault/notes ledger init
+    claude mcp add --scope user notes -- arcana --vault ~/vault/notes serve
 
-      1. Explore  AI reads the project using tools (tree, read, search)
-      2. Plan     proposes notes to create, with paths and summaries
-      3. Cost     shows tokens spent so far + estimated generation cost
-      4. Prompt   [g]enerate / [e]dit plan in $EDITOR / [q]uit
-      5. Generate writes drafts to .arcana/drafts/<session>/
+    init writes note types (.arcana/types/*.toml: chapter, lab-note,
+    post) and writing styles (.arcana/skills/*.md). Each type sets what
+    agents may do (chapter, writing, log, pointer), a path pattern,
+    tags, a template and a style.
 
-    Use --skill to load domain-specific extraction instructions (e.g.
-    a skill that knows how to find model equations in scientific code).
-    Use --auto to skip the interactive prompt (for scripts/CI).
+  \x1b[4mReview\x1b[0m
 
-  \x1b[4mTidy (inbox → structured notes)\x1b[0m
+    arcana review                     pending changes and unreviewed agent text
+    arcana ledger status --short      count for a tmux status bar
 
-    arcana tidy inbox/
-    arcana tidy inbox/brain-dump.md
-    arcana tidy --tags unsorted
+    Keys: j/k item · a accept · r reject · c reject with a reason ·
+    e edit yourself in $EDITOR · space/b, ctrl-d/ctrl-u, g/G, mouse
+    wheel scroll · q quit. A light edit to your words (typo,
+    punctuation, citation, at most 3 words) keeps them yours when
+    accepted, recorded under the policy light-edit@1.
 
-    Takes existing messy vault notes and reorganizes them — moves to
-    the right zone, splits multi-topic dumps, extracts reusable
-    concepts. The AI reads your notes and rewrites them to fit your
-    vault's taxonomy. Source material is vault notes; output is
-    restructured vault notes.
+  \x1b[4mAuthorship\x1b[0m
 
-      1. Survey   reads target notes, gathers vault context
-      2. Plan     proposes moves / splits / concept extractions
-      3. Cost     shows tokens spent + estimated generation cost
-      4. Prompt   [g]enerate / [e]dit plan in $EDITOR / [q]uit
-      5. Generate writes drafts to .arcana/drafts/<session>/
+    arcana blame <note>               who wrote each word
+    arcana blame --stats --all        word counts by author, every note
+    arcana restore <note> <commit>    restores text with its original authors
+    arcana ledger import <notes>      bring notes in (never credited to you)
 
-    Use --auto to skip the prompt. Use --tags to filter by tag.
+\x1b[1mLegacy vaults:\x1b[0m
 
-  \x1b[4mReview (approve or reject AI drafts)\x1b[0m
+  ingest, tidy and chat run plan-first AI pipelines that write drafts to
+  .arcana/drafts/<session>/, approved with `arcana review`. blame shows
+  line-level attribution from git commit authors. These commands refuse
+  ledger vaults, where only planned edits may write.
 
-    arcana review
+\x1b[1mBoth:\x1b[0m
 
-    All AI output lands in drafts — never directly in the vault.
-    Review shows each pending draft with a diff against the vault.
-    Accept, reject, or edit before committing. Git tracks provenance
-    (human vs AI authorship) per line via arcana blame.
-
-  \x1b[4mSkills (domain-specific AI instructions)\x1b[0m
-
-    arcana skills                    list available skills
-    arcana ingest . --skill extract  use a skill during ingest
-
-    Skills are markdown files in .arcana/skills/ that teach the AI
-    how to extract knowledge for a specific domain. They're injected
-    into the system prompt alongside your brain profile (taxonomy +
-    style guide). Examples: extracting model equations from scientific
-    code, mapping API patterns, documenting infrastructure.
-
-  \x1b[4mSearch & read\x1b[0m
-
-    arcana search \"rust async\"     full-text search across all notes
-    arcana read concepts/foo.md    print a note's content
-    arcana context \"topic\"         generate LLM context block from vault
-
-  \x1b[4mProvenance\x1b[0m
-
-    arcana blame concepts/foo.md   line-level human vs AI attribution
-    arcana log concepts/foo.md     git history for a note
-    arcana diff concepts/foo.md    uncommitted changes
-    arcana restore <note> <hash>   restore to a previous version";
+    arcana search \"rust async\"     full-text search
+    arcana read <note>             print a note
+    arcana context \"topic\"         LLM context block from search
+    arcana log <note>              git history
+    arcana diff <note>             uncommitted changes";
 
 #[derive(Parser)]
 #[command(
     name = "arcana",
-    about = "Fast Obsidian vault indexer and search",
+    about = "Markdown notes with recorded authorship: search, MCP server for agents, review of agent changes",
     after_long_help = WORKFLOWS_HELP
 )]
 pub struct Cli {

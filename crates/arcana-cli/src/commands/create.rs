@@ -37,7 +37,24 @@ impl Run for CreateArgs {
             fm.tags = tags.split(',').map(|t| t.trim().to_string()).collect();
         }
 
-        vault.create_note(&self.path, &self.body, Some(fm))?;
+        if let Some(ledger) = vault.ledger() {
+            let note = arcana_core::Note {
+                path: self.path.clone().into(),
+                frontmatter: fm,
+                body: self.body.clone(),
+                file_meta: arcana_core::FileMeta {
+                    size_bytes: 0,
+                    modified_on_disk: std::time::SystemTime::now(),
+                    content_hash: 0,
+                },
+            };
+            if let Some(e) = ledger.create_outside(&self.path, &note.to_string(), vault.git())? {
+                eprintln!("warning: {e}");
+            }
+            vault.reindex_paths(&[vault.root().join(&self.path)])?;
+        } else {
+            vault.create_note(&self.path, &self.body, Some(fm))?;
+        }
 
         if json {
             println!(

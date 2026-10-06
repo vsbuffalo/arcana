@@ -9,23 +9,23 @@ use crate::output::is_stderr_tty;
 
 #[derive(Args)]
 pub struct ReviewArgs {
-    /// List all sessions with pending drafts
+    /// [legacy] List all sessions with pending drafts
     #[arg(long)]
     pub list: bool,
 
-    /// Approve all pending drafts in a session
+    /// [legacy] Approve all pending drafts in a session
     #[arg(long)]
     pub approve_all: bool,
 
-    /// Session ID to operate on
+    /// [legacy] Session ID to operate on
     #[arg(long)]
     pub session: Option<String>,
 
-    /// Run LLM style verification on each draft before review
+    /// [legacy] Run LLM style verification on each draft before review
     #[arg(long)]
     pub verify_style: bool,
 
-    /// Prune old resolved sessions
+    /// [legacy] Prune old resolved sessions
     #[arg(long)]
     pub prune: bool,
 }
@@ -38,6 +38,14 @@ pub fn run_review(
 ) -> Result<()> {
     let vault = arcana_core::Vault::open(config.clone())?;
     if vault.ledger().is_some() {
+        if args.list
+            || args.approve_all
+            || args.session.is_some()
+            || args.verify_style
+            || args.prune
+        {
+            anyhow::bail!("draft-session flags apply to legacy vaults; this vault is reviewed interactively with `arcana review`");
+        }
         return crate::commands::review_tui::run(vault);
     }
     if !json {

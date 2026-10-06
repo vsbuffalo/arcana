@@ -10,7 +10,7 @@ pub struct BlameArgs {
     /// Path to the note (relative to vault root)
     pub path: Option<String>,
 
-    /// Show aggregate stats instead of line-by-line blame
+    /// Show counts by author instead of the annotated note
     #[arg(long)]
     pub stats: bool,
 
@@ -21,8 +21,21 @@ pub struct BlameArgs {
 
 pub fn run_blame(args: BlameArgs, config: ArcanaConfig, json: bool) -> Result<()> {
     let vault = arcana_core::Vault::open(config)?;
-    if let (Some(ledger), Some(path)) = (vault.ledger(), args.path.as_deref()) {
-        return ledger_blame(ledger, path, json);
+    if let Some(ledger) = vault.ledger() {
+        return match (args.stats, args.path.as_deref()) {
+            (true, Some(path)) if !args.all => ledger_stats(ledger, &[path.to_string()], json),
+            (true, _) => {
+                vault.index()?;
+                let notes: Vec<String> = vault
+                    .list(&arcana_core::SearchFilters::default(), 100_000)?
+                    .into_iter()
+                    .map(|r| r.path)
+                    .collect();
+                ledger_stats(ledger, &notes, json)
+            }
+            (false, Some(path)) => ledger_blame(ledger, path, json),
+            (false, None) => anyhow::bail!("give a note path, or --stats --all"),
+        };
     }
     if !json {
         crate::output::print_git_init_info(&vault);
@@ -126,6 +139,34 @@ pub fn run_blame(args: BlameArgs, config: ArcanaConfig, json: bool) -> Result<()
         println!("{:>4} {:30} {}", line.line_no, author_display, line.content);
     }
 
+    Ok(())
+}
+
+/// Word counts by author class, one line per note.
+fn ledger_stats(ledger: &arcana_core::attr::Ledger, notes: &[String], json: bool) -> Result<()> {
+    let mut rows = Vec::new();
+    for n in notes {
+        let st = ledger.state(n)?;
+        rows.push((n.clone(), st.kind.as_str(), st.attribution.summary()));
+    }
+    if json {
+        let v: Vec<_> = rows
+            .iter()
+            .map(|(n, k, s)| serde_json::json!({"path": n, "kind": k, "words": s}))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&v)?);
+        return Ok(());
+    }
+    println!(
+        "{:>7} {:>7} {:>10} {:>12}  note",
+        "yours", "agent", "unreviewed", "unattributed"
+    );
+    for (n, k, s) in rows {
+        println!(
+            "{:>7} {:>7} {:>10} {:>12}  {n} [{k}]",
+            s.human, s.agent, s.unreviewed, s.unattributed
+        );
+    }
     Ok(())
 }
 
