@@ -27,12 +27,13 @@ pub enum LedgerCommand {
         /// write), or unattributed
         #[arg(long = "as", default_value = "unattributed")]
         as_: String,
-        /// Copy notes in from another directory, following a plan file:
-        /// tab-separated `from  to  as` per line, `#` comments, `-` in `to`
-        /// to skip a note. The plan is kept in .arcana/imports/.
+        /// Follow a plan file: tab-separated `from  to  as` per line, `#`
+        /// comments, `-` in `to` to skip a note, `delete` (in place) to remove
+        /// it. The plan is kept in .arcana/imports/.
         #[arg(long, requires = "from")]
         plan: Option<std::path::PathBuf>,
-        /// Directory the plan's `from` paths are relative to (e.g. the old vault)
+        /// Directory the plan's `from` paths are relative to: another vault
+        /// (notes are copied in) or this vault itself (labelled and moved in place)
         #[arg(long)]
         from: Option<std::path::PathBuf>,
         /// Show what would happen without writing anything
@@ -59,6 +60,7 @@ default_kind = "chapter"
 # matching rule wins.
 [ledger.kinds]
 "writing/" = "writing"
+"blog-posts/" = "writing"
 "personal/" = "writing"
 "logs/" = "log"
 "projects/*/lab/**" = "log"
@@ -75,11 +77,11 @@ const GITIGNORE: &str = ".arcana/index.db
 .obsidian/workspace*.json
 ";
 
-const TYPE_CHAPTER: &str = r#"description = "A textbook chapter on one concept, written for the vault's reader"
+const TYPE_CHAPTER: &str = r#"description = "An explanation of one concept, written for the vault's reader and refined in place"
 kind = "chapter"
-path = "textbook/{subject}/{slug}.md"
-tags = ["textbook"]
-style = "textbook"
+path = "notes/{subject}/{slug}.md"
+tags = ["notes"]
+style = "explanation"
 template = """
 ## Idea
 
@@ -117,9 +119,9 @@ path = "writing/{slug}.md"
 tags = ["writing"]
 "#;
 
-const SKILL_TEXTBOOK: &str = r#"---
-title: Textbook chapter style
-description: How to write and refine chapters of the reader's personal textbook
+const SKILL_EXPLANATION: &str = r#"---
+title: Explanation style
+description: How to write and refine explanations for the vault's reader
 ---
 
 Write for a sharp scientist reading cold: precise, warm, teacherly, never
@@ -185,18 +187,40 @@ fn write_new(path: &Path, content: &str) -> Result<()> {
     std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))
 }
 
+/// Append any of `wanted`'s lines missing from the file (creating it).
+fn ensure_lines(path: &Path, wanted: &str) -> Result<()> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let have: std::collections::HashSet<&str> = existing.lines().map(str::trim).collect();
+    let missing: Vec<&str> = wanted
+        .lines()
+        .filter(|l| !have.contains(l.trim()))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut out = existing.clone();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    for l in missing {
+        out.push_str(l);
+        out.push('\n');
+    }
+    std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))
+}
+
 fn init(config: &ArcanaConfig) -> Result<()> {
     let root = config.vault.path.clone();
     std::fs::create_dir_all(&root)?;
     let a = root.join(".arcana");
     write_new(&a.join("config.toml"), CONFIG)?;
-    write_new(&root.join(".gitignore"), GITIGNORE)?;
+    ensure_lines(&root.join(".gitignore"), GITIGNORE)?;
     write_new(&a.join("types/chapter.toml"), TYPE_CHAPTER)?;
     write_new(&a.join("types/lab-note.toml"), TYPE_LAB_NOTE)?;
     write_new(&a.join("types/post.toml"), TYPE_POST)?;
-    write_new(&a.join("skills/textbook.md"), SKILL_TEXTBOOK)?;
+    write_new(&a.join("skills/explanation.md"), SKILL_EXPLANATION)?;
     write_new(&a.join("skills/lab-note.md"), SKILL_LAB_NOTE)?;
-    for d in ["textbook", "writing", "projects", "logs"] {
+    for d in ["notes", "writing", "projects", "logs"] {
         std::fs::create_dir_all(root.join(d))?;
     }
 
@@ -222,7 +246,7 @@ fn init(config: &ArcanaConfig) -> Result<()> {
             ".arcana/types/chapter.toml",
             ".arcana/types/lab-note.toml",
             ".arcana/types/post.toml",
-            ".arcana/skills/textbook.md",
+            ".arcana/skills/explanation.md",
             ".arcana/skills/lab-note.md",
         ];
         let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
@@ -230,7 +254,7 @@ fn init(config: &ArcanaConfig) -> Result<()> {
     }
     eprintln!("ledger vault ready at {}", root.display());
     eprintln!("  note types: chapter, lab-note, post   (edit .arcana/types/*.toml)");
-    eprintln!("  styles:     .arcana/skills/textbook.md, lab-note.md");
+    eprintln!("  styles:     .arcana/skills/explanation.md, lab-note.md");
     eprintln!("  review:     arcana --vault {} review", root.display());
     Ok(())
 }
@@ -250,10 +274,18 @@ fn import(config: ArcanaConfig, paths: &[String], as_: &ImportAs) -> Result<()> 
     Ok(())
 }
 
+enum Target {
+    /// Leave the note out (or, in place, untouched).
+    Skip,
+    /// In place only: delete the note (git keeps its history).
+    Delete,
+    Path(String),
+}
+
 struct PlanRow {
     line: usize,
     from: String,
-    to: Option<String>,
+    to: Target,
     as_: ImportAs,
 }
 
@@ -268,10 +300,15 @@ fn parse_plan(text: &str) -> Result<Vec<PlanRow>> {
         let [from, to, as_, ..] = cols.as_slice() else {
             bail!("plan line {}: expected `from<TAB>to<TAB>as`", i + 1);
         };
+        let to = match *to {
+            "" | "-" => Target::Skip,
+            "delete" => Target::Delete,
+            p => Target::Path(p.to_string()),
+        };
         rows.push(PlanRow {
             line: i + 1,
             from: from.to_string(),
-            to: (!to.is_empty() && *to != "-").then(|| to.to_string()),
+            to,
             as_: as_
                 .parse()
                 .with_context(|| format!("plan line {}", i + 1))?,
@@ -280,8 +317,12 @@ fn parse_plan(text: &str) -> Result<Vec<PlanRow>> {
     Ok(rows)
 }
 
-/// Copy notes from another directory into this vault per a plan file, each
-/// credited as the plan says, then keep the plan as the import's record.
+/// Bring notes under the ledger per a plan file. With `--from` another
+/// directory, notes are copied in. With `--from` this vault itself, the plan
+/// works in place: a note whose `to` equals `from` is labelled where it is, a
+/// different `to` moves it, and `delete` removes it (git keeps the history).
+/// Every row is checked before anything is written; the plan is kept under
+/// `.arcana/imports/` as the record.
 fn import_plan(config: ArcanaConfig, plan: &Path, from: &Path, dry_run: bool) -> Result<()> {
     let text =
         std::fs::read_to_string(plan).with_context(|| format!("reading {}", plan.display()))?;
@@ -290,30 +331,39 @@ fn import_plan(config: ArcanaConfig, plan: &Path, from: &Path, dry_run: bool) ->
     let ledger = vault
         .ledger()
         .context("not a ledger vault (run `arcana ledger init`)")?;
+    let root = vault.root().to_path_buf();
+    let in_place = from.canonicalize().ok().as_deref() == Some(root.as_path());
+    let tracked = |rel: &str| {
+        root.join(arcana_core::attr::Ledger::sidecar_rel(rel))
+            .exists()
+    };
 
-    // Check everything before writing anything.
     let mut problems = Vec::new();
     let mut targets = std::collections::BTreeSet::new();
     for r in &rows {
+        let at = |m: String| format!("line {}: {m}", r.line);
         if !from.join(&r.from).is_file() {
-            problems.push(format!(
-                "line {}: {} not found under {}",
-                r.line,
-                r.from,
-                from.display()
-            ));
+            problems.push(at(format!("{} not found under {}", r.from, from.display())));
         }
-        if let Some(to) = &r.to {
-            arcana_core::vault_path::validate_rel(to)
-                .map_err(|e| anyhow::anyhow!("line {}: {e}", r.line))?;
-            if vault.root().join(to).exists() {
-                problems.push(format!(
-                    "line {}: {to} already exists in this vault",
-                    r.line
-                ));
+        if in_place && tracked(&r.from) {
+            problems.push(at(format!("{} is already under the ledger", r.from)));
+        }
+        match &r.to {
+            Target::Skip => {}
+            Target::Delete if !in_place => {
+                problems.push(at("`delete` only applies when importing in place".into()))
             }
-            if !targets.insert(to.clone()) {
-                problems.push(format!("line {}: {to} is the target of two lines", r.line));
+            Target::Delete => {}
+            Target::Path(to) => {
+                arcana_core::vault_path::validate_rel(to)
+                    .map_err(|e| anyhow::anyhow!(at(e.to_string())))?;
+                let same = in_place && *to == r.from;
+                if !same && root.join(to).exists() {
+                    problems.push(at(format!("{to} already exists in this vault")));
+                }
+                if !targets.insert(to.clone()) {
+                    problems.push(at(format!("{to} is the target of two lines")));
+                }
             }
         }
     }
@@ -324,29 +374,65 @@ fn import_plan(config: ArcanaConfig, plan: &Path, from: &Path, dry_run: bool) ->
         );
     }
 
-    let (mut imported, mut skipped) = (0, 0);
+    let git = vault.git();
+    let (mut imported, mut deleted, mut skipped) = (0, 0, 0);
     for r in &rows {
-        let Some(to) = &r.to else {
-            skipped += 1;
-            continue;
-        };
-        if dry_run {
-            eprintln!("would import {} → {to} as {}", r.from, r.as_);
-            imported += 1;
-            continue;
+        match &r.to {
+            Target::Skip => skipped += 1,
+            Target::Delete => {
+                if dry_run {
+                    eprintln!("would delete {}", r.from);
+                } else {
+                    std::fs::remove_file(root.join(&r.from))?;
+                    if let Some(git) = git {
+                        git.commit_paths(
+                            &[Path::new(&r.from)],
+                            &format!("arcana: delete {} (import plan)", r.from),
+                            true,
+                        )?;
+                    }
+                }
+                deleted += 1;
+            }
+            Target::Path(to) => {
+                if dry_run {
+                    let verb = if in_place && *to == r.from {
+                        "label"
+                    } else {
+                        "import"
+                    };
+                    eprintln!("would {verb} {} → {to} as {}", r.from, r.as_);
+                    imported += 1;
+                    continue;
+                }
+                let dest = root.join(to);
+                if let Some(dir) = dest.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                let moved = in_place && *to != r.from;
+                if moved {
+                    std::fs::rename(root.join(&r.from), &dest)?;
+                } else if !in_place {
+                    std::fs::copy(from.join(&r.from), &dest)?;
+                }
+                if let Some(e) = ledger.import(to, &r.as_, git)? {
+                    eprintln!("{to}: {e}");
+                }
+                if moved {
+                    if let Some(git) = git {
+                        git.commit_paths(
+                            &[Path::new(&r.from)],
+                            &format!("arcana: move {} → {to}", r.from),
+                            true,
+                        )?;
+                    }
+                }
+                imported += 1;
+            }
         }
-        let dest = vault.root().join(to);
-        if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::copy(from.join(&r.from), &dest)?;
-        if let Some(e) = ledger.import(to, &r.as_, vault.git())? {
-            eprintln!("{to}: {e}");
-        }
-        imported += 1;
     }
     if dry_run {
-        eprintln!("{imported} to import, {skipped} skipped (dry run; nothing written)");
+        eprintln!("{imported} to import, {deleted} to delete, {skipped} untouched (dry run; nothing written)");
         return Ok(());
     }
 
@@ -356,8 +442,8 @@ fn import_plan(config: ArcanaConfig, plan: &Path, from: &Path, dry_run: bool) ->
         .unwrap_or("import.tsv");
     let record = format!(".arcana/imports/{name}");
     let header = format!("# imported from {} into this vault\n", from.display());
-    write_new(&vault.root().join(&record), &format!("{header}{text}"))?;
-    if let Some(git) = vault.git() {
+    write_new(&root.join(&record), &format!("{header}{text}"))?;
+    if let Some(git) = git {
         git.commit_paths(
             &[Path::new(&record)],
             &format!("arcana: record import plan {name}"),
@@ -365,7 +451,7 @@ fn import_plan(config: ArcanaConfig, plan: &Path, from: &Path, dry_run: bool) ->
         )?;
     }
     vault.index()?;
-    eprintln!("{imported} imported, {skipped} skipped; plan kept at {record}");
+    eprintln!("{imported} imported, {deleted} deleted, {skipped} untouched; plan kept at {record}");
     Ok(())
 }
 
