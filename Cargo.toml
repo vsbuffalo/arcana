@@ -67,7 +67,7 @@ rustyline = "14"
 similar = "2"
 
 # TUI
-ratatui = "0.30"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 
 # Regex
 regex = "1"

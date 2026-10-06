@@ -3,15 +3,25 @@
 //!
 //! Keys: j/k move · a accept · r reject · c reject with a reason · e edit the
 //! note yourself in $EDITOR · q quit. Every decision advances to the next item.
+//! The detail pane scrolls with space/b (page), ctrl-d/ctrl-u (half page),
+//! g/G (top/bottom), or the mouse wheel; the wheel over the list moves the
+//! selection. Selecting another item returns the detail to its top.
 
 use anyhow::Result;
 use arcana_core::attr::{Ledger, Pending, RawEdit, UnreviewedSpan};
 use arcana_core::Vault;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Layout};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
+use ratatui::crossterm::execute;
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 use ratatui::{DefaultTerminal, Frame};
 use similar::{ChangeTag, TextDiff};
 
@@ -55,7 +65,17 @@ struct App {
     reason: Option<String>,
     accepted: usize,
     rejected: usize,
+    /// Detail pane scroll offset, in wrapped lines.
+    scroll: u16,
+    /// Wrapped line count of the current detail, from the last draw.
+    detail_lines: u16,
+    /// Pane areas from the last draw, for mouse hit-testing and paging.
+    list_area: Rect,
+    detail_area: Rect,
 }
+
+/// Lines the mouse wheel scrolls per notch.
+const WHEEL_LINES: i32 = 3;
 
 pub fn run(vault: Vault) -> Result<()> {
     let mut app = App {
@@ -65,15 +85,19 @@ pub fn run(vault: Vault) -> Result<()> {
         reason: None,
         accepted: 0,
         rejected: 0,
+        scroll: 0,
+        detail_lines: 0,
+        list_area: Rect::default(),
+        detail_area: Rect::default(),
     };
     reload(&vault, &mut app)?;
     if app.items.is_empty() {
         eprintln!("nothing to review");
         return Ok(());
     }
-    let mut terminal = ratatui::init();
+    let mut terminal = start_terminal();
     let result = event_loop(&mut terminal, &vault, &mut app);
-    ratatui::restore();
+    stop_terminal();
     eprintln!(
         "{} accepted · {} rejected · {} left",
         app.accepted,
@@ -81,6 +105,38 @@ pub fn run(vault: Vault) -> Result<()> {
         app.items.len()
     );
     result
+}
+
+fn start_terminal() -> DefaultTerminal {
+    let terminal = ratatui::init();
+    // Mouse capture gives real wheel events. Hold shift (Ghostty, iTerm) to
+    // select text while it is on.
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    terminal
+}
+
+fn stop_terminal() {
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    ratatui::restore();
+}
+
+/// Change the selection; a new item starts at the top of its detail.
+fn select(app: &mut App, f: impl FnOnce(&mut ListState)) {
+    let before = app.list.selected();
+    f(&mut app.list);
+    if app.list.selected() != before {
+        app.scroll = 0;
+    }
+}
+
+fn scroll_by(app: &mut App, delta: i32) {
+    let visible = app.detail_area.height.saturating_sub(2);
+    let max = app.detail_lines.saturating_sub(visible) as i32;
+    app.scroll = (app.scroll as i32 + delta).clamp(0, max.max(0)) as u16;
+}
+
+fn page(app: &App) -> i32 {
+    app.detail_area.height.saturating_sub(3).max(1) as i32
 }
 
 fn ledger(vault: &Vault) -> &Ledger {
@@ -110,8 +166,21 @@ fn reload(vault: &Vault, app: &mut App) -> Result<()> {
 fn event_loop(terminal: &mut DefaultTerminal, vault: &Vault, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| draw(f, app))?;
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let key = match event::read()? {
+            Event::Key(key) => key,
+            Event::Mouse(m) => {
+                let at = Position::new(m.column, m.row);
+                let over_list = app.list_area.contains(at);
+                match m.kind {
+                    MouseEventKind::ScrollDown if over_list => select(app, |l| l.select_next()),
+                    MouseEventKind::ScrollUp if over_list => select(app, |l| l.select_previous()),
+                    MouseEventKind::ScrollDown => scroll_by(app, WHEEL_LINES),
+                    MouseEventKind::ScrollUp => scroll_by(app, -WHEEL_LINES),
+                    _ => {}
+                }
+                continue;
+            }
+            _ => continue,
         };
         if key.kind != KeyEventKind::Press {
             continue;
@@ -133,8 +202,18 @@ fn event_loop(terminal: &mut DefaultTerminal, vault: &Vault, app: &mut App) -> R
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-            KeyCode::Char('j') | KeyCode::Down => app.list.select_next(),
-            KeyCode::Char('k') | KeyCode::Up => app.list.select_previous(),
+            KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                scroll_by(app, page(app) / 2)
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                scroll_by(app, -page(app) / 2)
+            }
+            KeyCode::Char('j') | KeyCode::Down => select(app, |l| l.select_next()),
+            KeyCode::Char('k') | KeyCode::Up => select(app, |l| l.select_previous()),
+            KeyCode::Char(' ') | KeyCode::PageDown => scroll_by(app, page(app)),
+            KeyCode::Char('b') | KeyCode::PageUp => scroll_by(app, -page(app)),
+            KeyCode::Char('g') | KeyCode::Home => app.scroll = 0,
+            KeyCode::Char('G') | KeyCode::End => scroll_by(app, i32::MAX / 2),
             KeyCode::Char('a') => decide(vault, app, true, None)?,
             KeyCode::Char('r') => decide(vault, app, false, None)?,
             KeyCode::Char('c') => app.reason = Some(String::new()),
@@ -204,12 +283,12 @@ fn edit_myself(terminal: &mut DefaultTerminal, vault: &Vault, app: &mut App) -> 
     let tmp = tempfile::Builder::new().suffix(".md").tempfile()?;
     std::fs::write(tmp.path(), &st.content)?;
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nvim".into());
-    ratatui::restore();
+    stop_terminal();
     let status = std::process::Command::new(&editor)
         .arg(format!("+{line}"))
         .arg(tmp.path())
         .status();
-    *terminal = ratatui::init();
+    *terminal = start_terminal();
     match status {
         Ok(s) if s.success() => {
             let new = std::fs::read_to_string(tmp.path())?;
@@ -262,17 +341,33 @@ fn draw(f: &mut Frame, app: &mut App) {
         .and_then(|i| app.items.get(i))
         .map(|i| format!(" {} ", i.note()))
         .unwrap_or_default();
-    f.render_widget(
-        Paragraph::new(detail)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(title)),
-        right,
-    );
+    app.list_area = left;
+    app.detail_area = right;
+    let para = Paragraph::new(detail)
+        .wrap(Wrap { trim: false })
+        .block(Block::default().borders(Borders::ALL).title(title));
+    // Lines after wrapping, counted for the text width inside the borders.
+    let total = para
+        .line_count(right.width.saturating_sub(2))
+        .saturating_sub(2);
+    app.detail_lines = u16::try_from(total).unwrap_or(u16::MAX);
+    scroll_by(app, 0); // re-clamp after a resize or a shorter item
+    f.render_widget(para.scroll((app.scroll, 0)), right);
+    let visible = right.height.saturating_sub(2);
+    if app.detail_lines > visible {
+        let mut state = ScrollbarState::new(usize::from(app.detail_lines - visible))
+            .position(usize::from(app.scroll));
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight),
+            right.inner(ratatui::layout::Margin::new(0, 1)),
+            &mut state,
+        );
+    }
 
     let help = match &app.reason {
         Some(r) => format!(" reason for rejecting (enter to send, esc to cancel): {r}▏"),
         None => format!(
-            " a accept · r reject · c reject+why · e edit yourself · j/k move · q quit   {}",
+            " a accept · r reject · c reject+why · e edit · j/k item · space/b ^d/^u g/G scroll · q quit   {}",
             app.status
         ),
     };
@@ -420,6 +515,10 @@ mod tests {
             reason: None,
             accepted: 0,
             rejected: 0,
+            scroll: 0,
+            detail_lines: 0,
+            list_area: Rect::default(),
+            detail_area: Rect::default(),
         };
         let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -448,5 +547,53 @@ mod tests {
             apply_preview(&p),
             "My thoughts on teh resonance and its sharpness [@french1971]."
         );
+    }
+
+    fn screen(term: &Terminal<TestBackend>) -> String {
+        let buf = term.backend().buffer();
+        let w = buf.area.width as usize;
+        let cells: Vec<&str> = buf.content().iter().map(|c| c.symbol()).collect();
+        cells
+            .chunks(w)
+            .map(|r| r.concat())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn long_detail_scrolls_to_its_last_line() {
+        let text: String = (1..=80).map(|i| format!("line {i:02}\n")).collect();
+        let span = UnreviewedSpan {
+            note: "n.md".into(),
+            start: 0,
+            end: text.len(),
+            text,
+            agent: "a".into(),
+            request: None,
+        };
+        let mut app = App {
+            items: vec![Item::Unreviewed(span)],
+            list: ListState::default().with_selected(Some(0)),
+            status: String::new(),
+            reason: None,
+            accepted: 0,
+            rejected: 0,
+            scroll: 0,
+            detail_lines: 0,
+            list_area: Rect::default(),
+            detail_area: Rect::default(),
+        };
+        let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(screen(&term).contains("line 01"));
+        assert!(!screen(&term).contains("line 80"));
+        scroll_by(&mut app, i32::MAX / 2);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let s = screen(&term);
+        assert!(s.contains("line 80"), "last line visible after G:\n{s}");
+        assert!(s.contains("line 79"));
+        // Selecting changes reset the scroll.
+        select(&mut app, |l| l.select(Some(0)));
+        assert!(app.scroll > 0, "same item keeps its scroll");
     }
 }
