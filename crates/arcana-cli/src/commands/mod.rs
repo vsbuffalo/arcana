@@ -5,10 +5,12 @@ pub mod create;
 pub mod diff;
 pub mod index;
 pub mod ingest;
+pub mod ledger;
 pub mod log;
 pub mod read;
 pub mod restore;
 pub mod review;
+pub mod review_tui;
 pub mod search;
 pub mod serve;
 pub mod skills;
@@ -53,6 +55,8 @@ pub enum Commands {
     Ingest(ingest::IngestArgs),
     /// List available skills from .arcana/skills/
     Skills(skills::SkillsArgs),
+    /// Set up or inspect a vault that records who wrote every word
+    Ledger(ledger::LedgerArgs),
 }
 
 pub trait Run {
@@ -78,6 +82,7 @@ impl Commands {
             Commands::Tidy(args) => tidy::run_tidy(args, config, profile),
             Commands::Ingest(args) => ingest::run_ingest(args, config, profile),
             Commands::Skills(args) => skills::run_skills(args, config, json),
+            Commands::Ledger(args) => ledger::run_ledger(args, config, json),
         }
     }
 }

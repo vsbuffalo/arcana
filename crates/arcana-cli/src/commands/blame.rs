@@ -21,6 +21,9 @@ pub struct BlameArgs {
 
 pub fn run_blame(args: BlameArgs, config: ArcanaConfig, json: bool) -> Result<()> {
     let vault = arcana_core::Vault::open(config)?;
+    if let (Some(ledger), Some(path)) = (vault.ledger(), args.path.as_deref()) {
+        return ledger_blame(ledger, path, json);
+    }
     if !json {
         crate::output::print_git_init_info(&vault);
     }
@@ -123,5 +126,69 @@ pub fn run_blame(args: BlameArgs, config: ArcanaConfig, json: bool) -> Result<()
         println!("{:>4} {:30} {}", line.line_no, author_display, line.content);
     }
 
+    Ok(())
+}
+
+/// Word-level authorship from the ledger: your words plain, agent words cyan
+/// (dimmed while unreviewed), unattributed words yellow.
+fn ledger_blame(ledger: &arcana_core::attr::Ledger, path: &str, json: bool) -> Result<()> {
+    use arcana_core::attr::{attribution::zip, Author};
+
+    let st = ledger.state(path)?;
+    let a = &st.attribution;
+    let sum = a.summary();
+    if json {
+        let runs: Vec<_> = a
+            .runs()
+            .iter()
+            .map(|(start, len, t)| {
+                serde_json::json!({
+                    "start": start, "len": len,
+                    "author": a.author_of(t),
+                    "origin": t.origin,
+                    "unreviewed": t.unreviewed,
+                    "policy": t.policy,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "path": path, "kind": st.kind.as_str(), "summary": sum, "runs": runs
+            }))?
+        );
+        return Ok(());
+    }
+    let mut out = String::new();
+    let mut pos = 0;
+    for (tok, attr) in zip(&st.content, a) {
+        out.push_str(&st.content[pos..tok.start]);
+        let text = tok.text(&st.content);
+        let shown = match a.author_of(attr) {
+            Author::Human { .. } if attr.policy.is_some() => text.underline().to_string(),
+            Author::Human { .. } => text.normal().to_string(),
+            Author::Agent { .. } if attr.unreviewed => text.cyan().dimmed().to_string(),
+            Author::Agent { .. } => text.cyan().to_string(),
+            Author::Unattributed => text.yellow().to_string(),
+        };
+        out.push_str(&shown);
+        pos = tok.end;
+    }
+    out.push_str(&st.content[pos..]);
+    print!("{out}");
+    eprintln!(
+        "\n{}  {} yours · {} agent ({} unreviewed) · {} unattributed  [{}]",
+        path.bold(),
+        sum.human,
+        sum.agent.to_string().cyan(),
+        sum.unreviewed,
+        sum.unattributed.to_string().yellow(),
+        st.kind.as_str()
+    );
+    eprintln!(
+        "{}",
+        "words: yours plain · light edits to yours underlined · agent cyan (dim = unreviewed) · unattributed yellow"
+            .dimmed()
+    );
     Ok(())
 }

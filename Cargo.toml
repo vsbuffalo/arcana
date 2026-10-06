@@ -68,7 +68,6 @@ similar = "2"
 
 # TUI
 ratatui = "0.30"
-crossterm = "0.29"
 
 # Regex
 regex = "1"

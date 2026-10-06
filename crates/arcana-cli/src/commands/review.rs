@@ -37,6 +37,9 @@ pub fn run_review(
     profile: Option<String>,
 ) -> Result<()> {
     let vault = arcana_core::Vault::open(config.clone())?;
+    if vault.ledger().is_some() {
+        return crate::commands::review_tui::run(vault);
+    }
     if !json {
         crate::output::print_git_init_info(&vault);
     }

@@ -743,6 +743,13 @@ mod tests {
 
     #[test]
     fn open_or_init_errors_without_identity() {
+        // libgit2 falls back to the global git identity; this test can only
+        // observe the error on a machine without one.
+        let global = git2::Config::open_default().ok();
+        if global.is_some_and(|c| c.get_string("user.email").is_ok()) {
+            eprintln!("skipped: a global git identity is configured");
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let config = GitConfig {
             enabled: true,

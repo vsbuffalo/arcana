@@ -5,6 +5,7 @@ use std::time::Instant;
 use tracing::{debug, info, warn};
 use walkdir::WalkDir;
 
+use crate::attr::Ledger;
 use crate::config::ArcanaConfig;
 use crate::drafts::DraftManager;
 use crate::errors::{ArcanaError, Result};
@@ -25,6 +26,7 @@ pub struct Vault {
     init_info: Option<InitInfo>,
     drafts: DraftManager,
     profile: BrainProfile,
+    ledger: Option<Ledger>,
 }
 
 #[derive(Debug)]
@@ -69,6 +71,11 @@ impl Vault {
 
         let profile = BrainProfile::load(&root);
         let drafts = DraftManager::with_zones(&root, profile.zones(), profile.projects());
+        let ledger = if config.ledger.enabled {
+            Some(Ledger::open(&root, &config.ledger)?)
+        } else {
+            None
+        };
 
         Ok(Vault {
             db,
@@ -78,6 +85,7 @@ impl Vault {
             init_info,
             drafts,
             profile,
+            ledger,
         })
     }
 
@@ -100,11 +108,17 @@ impl Vault {
             init_info: None,
             drafts,
             profile,
+            ledger: None,
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// The attribution ledger, when `[ledger] enabled = true` for this vault.
+    pub fn ledger(&self) -> Option<&Ledger> {
+        self.ledger.as_ref()
     }
 
     pub fn config(&self) -> &ArcanaConfig {

@@ -213,6 +213,12 @@ async fn update_note(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let path = raw_path.strip_prefix('/').unwrap_or(&raw_path).to_string();
     let vault = vault.lock().await;
+    if vault.ledger().is_some() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this vault records authorship; write through the MCP vault_edit tool".to_string(),
+        ));
+    }
 
     if let Some(ref tags) = req.tags {
         // Full read-modify-write for tag changes
@@ -244,6 +250,12 @@ async fn create_note(
     Json(req): Json<CreateNoteRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let vault = vault.lock().await;
+    if vault.ledger().is_some() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this vault records authorship; write through the MCP vault_edit tool".to_string(),
+        ));
+    }
     let fm = if req.title.is_some() || !req.tags.is_empty() {
         Some(Frontmatter {
             title: req.title,
@@ -287,6 +299,12 @@ async fn delete_note_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let path = raw_path.strip_prefix('/').unwrap_or(&raw_path).to_string();
     let vault = vault.lock().await;
+    if vault.ledger().is_some() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "this vault records authorship; write through the MCP vault_edit tool".to_string(),
+        ));
+    }
     vault.delete_note(&path).map_err(ApiError::from)?;
 
     // Commit the deletion as human

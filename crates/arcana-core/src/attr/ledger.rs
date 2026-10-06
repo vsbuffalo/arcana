@@ -456,6 +456,16 @@ impl Ledger {
                 )));
             }
         }
+        // An outside edit since the last write is the human's (or
+        // unattributed): record and commit it before the agent's changes, so
+        // git never shows it under the agent's commit.
+        if st.outside_edit {
+            let paths = self.persist(&req.note, &st.content, &st.attribution)?;
+            if let Some(e) = self.commit_observed(&paths, git) {
+                tracing::warn!("ledger: {e}");
+            }
+            st.outside_edit = false;
+        }
         let author = grant.author(req.request.as_deref());
         let Author::Agent { agent, session, .. } = &author else {
             unreachable!("agent grant yields an agent author")
@@ -535,7 +545,7 @@ impl Ledger {
             applied_diff: None,
             commit_error: None,
         };
-        if st.content != original || st.outside_edit {
+        if st.content != original {
             let paths = self.persist(&req.note, &st.content, &st.attribution)?;
             outcome.applied_diff = Some(word_diff(&original, &st.content));
             let msg = commit_message(
@@ -977,20 +987,31 @@ fn context_around(content: &str, start: usize, end: usize) -> String {
     content[s..e.max(s)].to_string()
 }
 
-/// Inline word diff: `[-removed-]{+added+}`.
+/// Inline word diff: `[-removed-]{+added+}`, with adjacent changes merged.
 pub fn word_diff(old: &str, new: &str) -> String {
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_words(old, new);
     let mut out = String::new();
-    for op in diff.ops() {
-        for change in diff.iter_changes(op) {
-            match change.tag() {
-                ChangeTag::Equal => out.push_str(change.value()),
-                ChangeTag::Delete => out.push_str(&format!("[-{}-]", change.value())),
-                ChangeTag::Insert => out.push_str(&format!("{{+{}+}}", change.value())),
+    let mut run: Option<(ChangeTag, String)> = None;
+    let flush = |out: &mut String, run: &mut Option<(ChangeTag, String)>| {
+        if let Some((tag, text)) = run.take() {
+            match tag {
+                ChangeTag::Equal => out.push_str(&text),
+                ChangeTag::Delete => out.push_str(&format!("[-{text}-]")),
+                ChangeTag::Insert => out.push_str(&format!("{{+{text}+}}")),
+            }
+        }
+    };
+    for change in diff.iter_all_changes() {
+        match &mut run {
+            Some((tag, text)) if *tag == change.tag() => text.push_str(change.value()),
+            _ => {
+                flush(&mut out, &mut run);
+                run = Some((change.tag(), change.value().to_string()));
             }
         }
     }
+    flush(&mut out, &mut run);
     out
 }
 
@@ -1205,6 +1226,39 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dir.path().join("n.md")).unwrap(),
             "Mine.\n"
+        );
+    }
+
+    #[test]
+    fn rejection_is_recorded_with_reason_for_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = ledger(dir.path());
+        std::fs::write(dir.path().join("n.md"), "Mine entirely.\n").unwrap();
+        let out = l
+            .agent_edit(
+                EditRequest {
+                    note: "n.md".into(),
+                    base: None,
+                    request: None,
+                    rationale: None,
+                    edits: vec![RawEdit::Replace {
+                        find: "entirely".into(),
+                        with: "wholly and completely".into(),
+                    }],
+                },
+                agent(),
+                None,
+            )
+            .unwrap();
+        let id = out.results[0].pending_id.clone().unwrap();
+        l.reject(&id, Some("keep my wording".into())).unwrap();
+        assert!(l.pending().unwrap().is_empty());
+        let d = &l.decided(5).unwrap()[0];
+        assert!(!d.accepted);
+        assert_eq!(d.reason.as_deref(), Some("keep my wording"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("n.md")).unwrap(),
+            "Mine entirely.\n"
         );
     }
 }

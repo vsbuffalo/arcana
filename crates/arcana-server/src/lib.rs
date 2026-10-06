@@ -1,3 +1,4 @@
+pub mod ledger_tools;
 pub mod legacy_sse;
 pub mod oauth;
 pub mod rest;
@@ -169,18 +170,48 @@ pub struct ArcanaServer {
     vault: Arc<tokio::sync::Mutex<Vault>>,
     tool_router: ToolRouter<Self>,
     instructions: String,
+    /// One per connection; recorded with every agent write.
+    session: String,
 }
 
 impl ArcanaServer {
     pub fn new(vault: Vault) -> Self {
-        let tool_router = Self::tool_router();
-        let tree = vault.vault_tree().unwrap_or_default();
-        let instructions = build_mcp_instructions(vault.profile(), &tree);
+        let ledger = vault.ledger().is_some();
+        let instructions = instructions_for(&vault);
+        Self::with_shared(
+            Arc::new(tokio::sync::Mutex::new(vault)),
+            instructions,
+            ledger,
+        )
+    }
+
+    /// A server over a shared vault. A ledger vault gets the ledger tool set,
+    /// which has no whole-note writes.
+    pub fn with_shared(
+        vault: Arc<tokio::sync::Mutex<Vault>>,
+        instructions: String,
+        ledger: bool,
+    ) -> Self {
+        let tool_router = if ledger {
+            Self::ledger_tool_router()
+        } else {
+            Self::tool_router()
+        };
         Self {
-            vault: Arc::new(tokio::sync::Mutex::new(vault)),
+            vault,
             tool_router,
             instructions,
+            session: uuid::Uuid::new_v4().simple().to_string()[..8].to_string(),
         }
+    }
+}
+
+fn instructions_for(vault: &Vault) -> String {
+    if vault.ledger().is_some() {
+        ledger_tools::ledger_instructions(vault)
+    } else {
+        let tree = vault.vault_tree().unwrap_or_default();
+        build_mcp_instructions(vault.profile(), &tree)
     }
 }
 
@@ -562,8 +593,8 @@ pub async fn serve_sse(
     oauth_config: Option<OAuthConfig>,
     public_hosts: Vec<String>,
 ) -> anyhow::Result<()> {
-    let tree = vault.vault_tree().unwrap_or_default();
-    let instructions = build_mcp_instructions(vault.profile(), &tree);
+    let instructions = instructions_for(&vault);
+    let ledger_mode = vault.ledger().is_some();
     let vault_root = vault.root().to_path_buf();
     let vault_config = vault.config().clone();
     let vault = Arc::new(tokio::sync::Mutex::new(vault));
@@ -585,11 +616,7 @@ pub async fn serve_sse(
         move || {
             let vault = service_vault.clone();
             let instructions = instructions.clone();
-            Ok(ArcanaServer {
-                vault,
-                tool_router: ArcanaServer::tool_router(),
-                instructions,
-            })
+            Ok(ArcanaServer::with_shared(vault, instructions, ledger_mode))
         },
         Arc::new(LocalSessionManager::default()),
         config,
@@ -600,11 +627,7 @@ pub async fn serve_sse(
     let legacy_sse_state = legacy_sse::LegacySseState::new(move || {
         let vault = sse_vault.clone();
         let instructions = sse_instructions.clone();
-        ArcanaServer {
-            vault,
-            tool_router: ArcanaServer::tool_router(),
-            instructions,
-        }
+        ArcanaServer::with_shared(vault, instructions, ledger_mode)
     });
 
     // REST API routes (for iOS app and other HTTP clients)
@@ -738,6 +761,7 @@ fn start_watcher(
             // Async task: reindex immediately, git-commit periodically
             tokio::spawn(async move {
                 let mut dirty_paths: Vec<PathBuf> = Vec::new();
+                let mut ledger_dirty: Vec<PathBuf> = Vec::new();
                 let commit_duration = std::time::Duration::from_secs(commit_interval);
                 let mut commit_timer = tokio::time::interval(commit_duration);
                 commit_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -749,6 +773,36 @@ fn start_watcher(
                         Some(paths) = rx.recv() => {
                             // Reindex immediately — keeps search fresh
                             let vault = vault.lock().await;
+                            if let Some(ledger) = vault.ledger() {
+                                // Ledger vault: attribute outside edits now,
+                                // commit them in batches on the timer.
+                                for p in &paths {
+                                    let Some(rel) = p
+                                        .strip_prefix(vault.root())
+                                        .ok()
+                                        .and_then(|r| r.to_str())
+                                    else {
+                                        continue;
+                                    };
+                                    match ledger.observe(rel) {
+                                        Ok(arcana_core::attr::Observed::Unchanged) => {}
+                                        Ok(
+                                            arcana_core::attr::Observed::Updated { paths: changed }
+                                            | arcana_core::attr::Observed::Deleted { paths: changed }
+                                            | arcana_core::attr::Observed::Renamed { paths: changed, .. },
+                                        ) => {
+                                            for c in changed {
+                                                if !ledger_dirty.contains(&c) {
+                                                    ledger_dirty.push(c);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => warn!("ledger: could not attribute {rel}: {e}"),
+                                    }
+                                }
+                                let _ = vault.reindex_paths(&paths);
+                                continue;
+                            }
                             match vault.reindex_paths(&paths) {
                                 Ok(stats) => {
                                     if stats.notes_added > 0
@@ -772,6 +826,18 @@ fn start_watcher(
                         }
                         _ = commit_timer.tick() => {
                             let vault = vault.lock().await;
+                            if let Some(ledger) = vault.ledger() {
+                                match ledger.sweep_orphans() {
+                                    Ok(removed) => ledger_dirty.extend(removed),
+                                    Err(e) => warn!("ledger: orphan sweep failed: {e}"),
+                                }
+                                if let Some(e) = ledger.commit_observed(&ledger_dirty, vault.git()) {
+                                    warn!("ledger: {e}");
+                                } else {
+                                    ledger_dirty.clear();
+                                }
+                                continue;
+                            }
                             if let Some(git) = vault.git() {
                                 // Adopt any untracked .md files (created outside arcana)
                                 match git.adopt_untracked() {
