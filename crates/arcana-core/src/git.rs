@@ -272,7 +272,8 @@ impl VaultGit {
             return Ok(None);
         }
 
-        let names: Vec<&str> = human_paths.iter().filter_map(|p| p.to_str()).collect();
+        let rels: Vec<PathBuf> = human_paths.iter().map(|p| self.relative(p)).collect();
+        let names: Vec<&str> = rels.iter().filter_map(|p| p.to_str()).collect();
         let message = match names.len() {
             0 => "vault: update notes".to_string(),
             1 => format!("vault: update {}", names[0]),
@@ -341,52 +342,140 @@ impl VaultGit {
         Ok(Some(count))
     }
 
+    /// Commit exactly `paths`, as they are on disk now, on top of the current HEAD.
+    ///
+    /// Several arcana processes share this repo (the server, a stdio MCP
+    /// server, the CLI), and libgit2's `repo.index()` is a per-process copy of
+    /// `.git/index` that is never re-read. Building the tree from that copy let
+    /// one process's commit silently revert or delete files another process had
+    /// committed. So the tree is built from HEAD's tree plus the named paths
+    /// only, in a throwaway in-memory index, and the commit is retried if
+    /// another process moved HEAD in between (libgit2 refuses to update HEAD
+    /// when its tip is no longer the first parent).
     fn stage_and_commit(&self, paths: &[&Path], message: &str, author: Author) -> Result<Oid> {
-        // Clear any stale lock left behind by a crash or SIGKILL
-        self.clear_stale_index_lock(std::time::Duration::from_secs(30))?;
+        const MAX_ATTEMPTS: usize = 5;
 
         let workdir = self
             .repo
             .workdir()
             .ok_or_else(|| ArcanaError::Config("bare repository not supported".into()))?;
-
-        let mut index = self.repo.index().map_err(git_err)?;
-
-        for path in paths {
-            // Convert to relative path from workdir
-            let rel = if path.is_absolute() {
-                path.strip_prefix(workdir).unwrap_or(path).to_path_buf()
-            } else {
-                path.to_path_buf()
-            };
-
-            let abs = workdir.join(&rel);
-            if abs.exists() {
-                index.add_path(&rel).map_err(git_err)?;
-            } else {
-                index.remove_path(&rel).map_err(git_err)?;
-            }
-        }
-
-        index.write().map_err(git_err)?;
-        let tree_oid = index.write_tree().map_err(git_err)?;
-        let tree = self.repo.find_tree(tree_oid).map_err(git_err)?;
+        let rels: Vec<PathBuf> = paths.iter().map(|p| self.relative(p)).collect();
 
         let sig = match author {
             Author::Ai => self.ai_signature().map_err(git_err)?,
             Author::Human => self.human_signature()?,
         };
 
-        let parent = self.repo.head().ok().and_then(|h| h.peel_to_commit().ok());
-        let parents: Vec<&git2::Commit<'_>> = parent.as_ref().into_iter().collect();
+        for attempt in 1..=MAX_ATTEMPTS {
+            let parent = self.repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+            let tree_oid = self.tree_with_paths(workdir, parent.as_ref(), &rels)?;
 
-        let oid = self
-            .repo
-            .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
-            .map_err(git_err)?;
+            if let Some(p) = &parent {
+                if p.tree_id() == tree_oid {
+                    debug!("nothing to commit for: {message}");
+                    return Ok(p.id());
+                }
+            }
 
-        debug!("committed {}: {}", &oid.to_string()[..8], message);
-        Ok(oid)
+            let tree = self.repo.find_tree(tree_oid).map_err(git_err)?;
+            let parents: Vec<&git2::Commit<'_>> = parent.as_ref().into_iter().collect();
+            match self
+                .repo
+                .commit(Some("HEAD"), &sig, &sig, message, &tree, &parents)
+            {
+                Ok(oid) => {
+                    debug!("committed {}: {}", &oid.to_string()[..8], message);
+                    if let Err(e) = self.sync_disk_index(workdir, &rels) {
+                        // History is already correct; a stale index only affects `git status`.
+                        warn!("committed {oid} but failed to update .git/index: {e}");
+                    }
+                    return Ok(oid);
+                }
+                Err(e) if e.code() == ErrorCode::Modified && attempt < MAX_ATTEMPTS => {
+                    debug!("HEAD moved during commit (attempt {attempt}), rebuilding tree");
+                }
+                Err(e) => return Err(git_err(e)),
+            }
+        }
+        unreachable!("loop returns on success, error, or final attempt")
+    }
+
+    /// Vault-relative form of `path` (accepts absolute paths under the workdir).
+    fn relative(&self, path: &Path) -> PathBuf {
+        if path.is_relative() {
+            return path.to_path_buf();
+        }
+        let workdir = self.repo.workdir().unwrap_or(Path::new("."));
+        if let Ok(rel) = path.strip_prefix(workdir) {
+            return rel.to_path_buf();
+        }
+        // libgit2's workdir is canonical (e.g. /private/tmp on macOS) while the
+        // caller's path may go through a symlink. Canonicalize the parent, since
+        // the file itself may have been deleted.
+        path.parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .zip(path.file_name())
+            .and_then(|(parent, name)| {
+                parent
+                    .join(name)
+                    .strip_prefix(workdir)
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
+            .unwrap_or_else(|| path.to_path_buf())
+    }
+
+    /// Write the tree of `parent` with `rels` replaced by their on-disk content
+    /// (or removed, if they no longer exist). Touches no shared state.
+    fn tree_with_paths(
+        &self,
+        workdir: &Path,
+        parent: Option<&git2::Commit<'_>>,
+        rels: &[PathBuf],
+    ) -> Result<Oid> {
+        let mut index = git2::Index::new().map_err(git_err)?;
+        if let Some(p) = parent {
+            index
+                .read_tree(&p.tree().map_err(git_err)?)
+                .map_err(git_err)?;
+        }
+        for rel in rels {
+            let abs = workdir.join(rel);
+            if abs.is_file() {
+                let content = std::fs::read(&abs)?;
+                let id = self.repo.blob(&content).map_err(git_err)?;
+                index
+                    .add(&blob_entry(rel, id, content.len()))
+                    .map_err(git_err)?;
+            } else {
+                match index.remove_path(rel) {
+                    Ok(()) => {}
+                    Err(e) if e.code() == ErrorCode::NotFound => {}
+                    Err(e) => return Err(git_err(e)),
+                }
+            }
+        }
+        index.write_tree_to(&self.repo).map_err(git_err)
+    }
+
+    /// Bring `.git/index` up to date for `rels` so `git status` agrees with
+    /// HEAD. Re-reads the index from disk first; never writes back a stale copy.
+    fn sync_disk_index(&self, workdir: &Path, rels: &[PathBuf]) -> Result<()> {
+        self.clear_stale_index_lock(std::time::Duration::from_secs(30))?;
+        let mut index = self.repo.index().map_err(git_err)?;
+        index.read(true).map_err(git_err)?;
+        for rel in rels {
+            if workdir.join(rel).is_file() {
+                index.add_path(rel).map_err(git_err)?;
+            } else {
+                match index.remove_path(rel) {
+                    Ok(()) => {}
+                    Err(e) if e.code() == ErrorCode::NotFound => {}
+                    Err(e) => return Err(git_err(e)),
+                }
+            }
+        }
+        index.write().map_err(git_err)
     }
 
     /// Git log for a specific file, or all commits if path is None.
@@ -584,6 +673,25 @@ impl VaultGit {
 enum Author {
     Ai,
     Human,
+}
+
+/// Index entry for a regular file blob; stat fields are irrelevant to tree writing.
+fn blob_entry(rel: &Path, id: Oid, len: usize) -> git2::IndexEntry {
+    let zero = git2::IndexTime::new(0, 0);
+    git2::IndexEntry {
+        ctime: zero,
+        mtime: zero,
+        dev: 0,
+        ino: 0,
+        mode: 0o100644,
+        uid: 0,
+        gid: 0,
+        file_size: len as u32,
+        id,
+        flags: 0,
+        flags_extended: 0,
+        path: rel.to_string_lossy().replace('\\', "/").into_bytes(),
+    }
 }
 
 fn git_err(e: git2::Error) -> ArcanaError {
