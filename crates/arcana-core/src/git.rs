@@ -308,6 +308,14 @@ impl VaultGit {
         Ok(())
     }
 
+    /// Commit exactly `paths` with the given author class. Used by the
+    /// attribution ledger, which records who wrote each word itself; the git
+    /// author is a summary, not the source of truth.
+    pub fn commit_paths(&self, paths: &[&Path], message: &str, human: bool) -> Result<Oid> {
+        let author = if human { Author::Human } else { Author::Ai };
+        self.stage_and_commit(paths, message, author)
+    }
+
     /// Adopt untracked `.md` files as human-authored and commit them.
     ///
     /// This catches files created outside arcana (by Obsidian, manual editing, etc.)

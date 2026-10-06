@@ -1,0 +1,195 @@
+//! Note kinds (fixed, decide write permissions) and note types (user-defined
+//! templates such as `lab-note` or `chapter`, each mapped to a kind).
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+use crate::errors::{ArcanaError, Result};
+
+/// What agents may do to a note. Set by its type or path, never by an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum NoteKind {
+    /// Textbook material: agents add and refine; new agent text lands
+    /// unreviewed, changes to existing text are gated.
+    #[default]
+    Chapter,
+    /// The human's own prose: every agent change is a suggestion.
+    Writing,
+    /// Dated records: agents append only.
+    Log,
+    /// A summary of, and link to, a document whose source of truth is elsewhere.
+    Pointer,
+}
+
+impl NoteKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NoteKind::Chapter => "chapter",
+            NoteKind::Writing => "writing",
+            NoteKind::Log => "log",
+            NoteKind::Pointer => "pointer",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "chapter" => NoteKind::Chapter,
+            "writing" => NoteKind::Writing,
+            "log" => NoteKind::Log,
+            "pointer" => NoteKind::Pointer,
+            _ => return None,
+        })
+    }
+}
+
+/// A user-defined note type, from `.arcana/types/<name>.toml`.
+///
+/// ```toml
+/// description = "A dated bench session: setup, measurements, observations"
+/// kind = "log"
+/// path = "projects/{project}/lab/{date}-{slug}.md"
+/// tags = ["lab"]
+/// style = "lab-note"          # .arcana/skills/lab-note.md
+/// template = """
+/// ## Setup
+/// ## Measurements
+/// ## Observations
+/// ## Next
+/// """
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteType {
+    #[serde(skip_deserializing)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub kind: NoteKind,
+    /// Path template; `{date}`, `{slug}` and any field passed at creation.
+    pub path: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Name of a skill in `.arcana/skills/` describing the writing style.
+    #[serde(default)]
+    pub style: Option<String>,
+    #[serde(default)]
+    pub template: String,
+}
+
+impl NoteType {
+    /// Expand the path template.
+    pub fn render_path(&self, title: &str, fields: &BTreeMap<String, String>) -> Result<String> {
+        let mut path = self.path.clone();
+        let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+        path = path
+            .replace("{date}", &date)
+            .replace("{slug}", &slugify(title));
+        for (k, v) in fields {
+            path = path.replace(&format!("{{{k}}}"), &slugify(v));
+        }
+        if let Some(start) = path.find('{') {
+            let end = path[start..]
+                .find('}')
+                .map_or(path.len(), |e| start + e + 1);
+            return Err(ArcanaError::Ledger(format!(
+                "note type `{}` needs field {} to build its path `{}`",
+                self.name,
+                &path[start..end],
+                self.path
+            )));
+        }
+        Ok(path)
+    }
+}
+
+pub fn slugify(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').to_string()
+}
+
+/// All note types defined in the vault.
+pub fn load_types(vault_root: &Path) -> Result<BTreeMap<String, NoteType>> {
+    let dir = vault_root.join(".arcana").join("types");
+    let mut out = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(out);
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let text = std::fs::read_to_string(&path)?;
+        let mut t: NoteType = toml::from_str(&text)
+            .map_err(|e| ArcanaError::Config(format!("note type {}: {e}", path.display())))?;
+        t.name = name.clone();
+        out.insert(name, t);
+    }
+    Ok(out)
+}
+
+/// The kind of a note: its frontmatter `type:` (through the type table), else
+/// the longest matching path prefix in `[ledger.kinds]`, else the default.
+pub fn kind_of(
+    rel_path: &str,
+    frontmatter_type: Option<&str>,
+    types: &BTreeMap<String, NoteType>,
+    prefixes: &BTreeMap<String, NoteKind>,
+    default: NoteKind,
+) -> NoteKind {
+    if let Some(t) = frontmatter_type.and_then(|t| types.get(t)) {
+        return t.kind;
+    }
+    prefixes
+        .iter()
+        .filter(|(p, _)| rel_path.starts_with(p.as_str()))
+        .max_by_key(|(p, _)| p.len())
+        .map_or(default, |(_, k)| *k)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_template() {
+        let t: NoteType =
+            toml::from_str("kind = \"log\"\npath = \"projects/{project}/lab/{date}-{slug}.md\"")
+                .unwrap();
+        let mut f = BTreeMap::new();
+        f.insert("project".into(), "Bench PSU 12V".into());
+        let p = t.render_path("Ripple FFT, run 2", &f).unwrap();
+        assert!(p.starts_with("projects/bench-psu-12v/lab/"));
+        assert!(p.ends_with("-ripple-fft-run-2.md"));
+        assert!(t.render_path("x", &BTreeMap::new()).is_err());
+    }
+
+    #[test]
+    fn kind_resolution() {
+        let mut prefixes = BTreeMap::new();
+        prefixes.insert("blog/".to_string(), NoteKind::Writing);
+        let types = BTreeMap::new();
+        assert_eq!(
+            kind_of("blog/post.md", None, &types, &prefixes, NoteKind::Chapter),
+            NoteKind::Writing
+        );
+        assert_eq!(
+            kind_of("notes/x.md", None, &types, &prefixes, NoteKind::Chapter),
+            NoteKind::Chapter
+        );
+    }
+}

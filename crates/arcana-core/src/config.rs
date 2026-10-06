@@ -95,6 +95,7 @@ pub struct ArcanaConfig {
     pub agent: AgentSettings,
     pub git: GitConfig,
     pub drafts: DraftsConfig,
+    pub ledger: LedgerConfig,
     /// Default LLM profile name — must exist in `[profiles]`.
     pub default_profile: String,
     /// Named LLM profiles. Each is a complete `LlmConfig`.
@@ -113,6 +114,7 @@ impl Default for ArcanaConfig {
             agent: AgentSettings::default(),
             git: GitConfig::default(),
             drafts: DraftsConfig::default(),
+            ledger: LedgerConfig::default(),
             default_profile: "default".to_string(),
             profiles: HashMap::new(),
             llm: None,
@@ -249,6 +251,33 @@ impl Default for GitConfig {
             user_email: String::new(),
             ai_name: "arcana-ai".to_string(),
             ai_email: "ai@arcana.local".to_string(),
+        }
+    }
+}
+
+/// Word-level attribution and the single write path (`[ledger]`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LedgerConfig {
+    /// Use the attribution ledger for this vault: agents write only through
+    /// planned edits, and every word has a recorded author.
+    pub enabled: bool,
+    /// Credit edits made outside arcana (Obsidian, Neovim) to the human. True
+    /// only when agents are barred from writing the vault directly, e.g. by
+    /// Claude Code's sandbox; otherwise such edits are unattributed.
+    pub outside_edits_are_human: bool,
+    /// Kind for notes without a `type:`; by longest matching path prefix.
+    pub kinds: std::collections::BTreeMap<String, crate::attr::NoteKind>,
+    pub default_kind: crate::attr::NoteKind,
+}
+
+impl Default for LedgerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            outside_edits_are_human: true,
+            kinds: Default::default(),
+            default_kind: crate::attr::NoteKind::Chapter,
         }
     }
 }

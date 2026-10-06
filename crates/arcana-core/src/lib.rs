@@ -1,3 +1,4 @@
+pub mod attr;
 pub mod config;
 pub mod drafts;
 pub mod errors;

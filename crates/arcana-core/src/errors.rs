@@ -37,6 +37,9 @@ pub enum ArcanaError {
 
     #[error("git error: {0}")]
     Git(String),
+
+    #[error("{0}")]
+    Ledger(String),
 }
 
 pub type Result<T> = std::result::Result<T, ArcanaError>;

@@ -13,7 +13,7 @@ default-members = ["crates/arcana-cli"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.80"
+rust-version = "1.89"
 
 [workspace.dependencies]
 # Serialization
@@ -65,6 +65,10 @@ rustyline = "14"
 
 # Diff
 similar = "2"
+
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
 
 # Regex
 regex = "1"
