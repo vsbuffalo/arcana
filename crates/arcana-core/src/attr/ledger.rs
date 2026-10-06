@@ -943,19 +943,22 @@ impl Ledger {
     pub fn import(
         &self,
         rel: &str,
-        as_agent: Option<&str>,
+        as_: &ImportAs,
         git: Option<&VaultGit>,
     ) -> Result<Option<String>> {
         let _lock = self.lock()?;
         let path = VaultPath::resolve(&self.root, rel)?;
         let content = std::fs::read_to_string(path.as_path())?;
-        let author = match as_agent {
-            Some(a) => Author::Agent {
-                agent: a.to_string(),
+        let author = match as_ {
+            ImportAs::Agent(a) => Author::Agent {
+                agent: a.clone(),
                 session: "import".into(),
                 request: None,
             },
-            None => Author::Unattributed,
+            ImportAs::Declared => Author::Human {
+                via: HumanVia::Declared,
+            },
+            ImportAs::Unattributed => Author::Unattributed,
         };
         let attr = Attribution::uniform(
             uuid::Uuid::new_v4().to_string(),
@@ -968,7 +971,43 @@ impl Ledger {
             },
         );
         let paths = self.persist(rel, &content, &attr)?;
-        Ok(self.commit(git, &paths, &format!("arcana: import {rel}"), false))
+        let human = matches!(as_, ImportAs::Declared);
+        Ok(self.commit(git, &paths, &format!("arcana: import {rel} ({as_})"), human))
+    }
+}
+
+/// Who imported words are credited to. Never a witnessed human: the closest
+/// is `Declared`, which records that the human claimed them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportAs {
+    Agent(String),
+    Declared,
+    Unattributed,
+}
+
+impl std::str::FromStr for ImportAs {
+    type Err = ArcanaError;
+    fn from_str(s: &str) -> Result<Self> {
+        match s.trim() {
+            "declared" => Ok(ImportAs::Declared),
+            "unattributed" | "" => Ok(ImportAs::Unattributed),
+            a => match a.strip_prefix("agent:") {
+                Some(name) if !name.is_empty() => Ok(ImportAs::Agent(name.to_string())),
+                _ => Err(ArcanaError::Ledger(format!(
+                    "import author must be agent:<name>, declared or unattributed, not {s:?}"
+                ))),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for ImportAs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ImportAs::Agent(a) => write!(f, "agent:{a}"),
+            ImportAs::Declared => f.write_str("declared"),
+            ImportAs::Unattributed => f.write_str("unattributed"),
+        }
     }
 }
 

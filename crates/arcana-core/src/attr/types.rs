@@ -143,7 +143,9 @@ pub fn load_types(vault_root: &Path) -> Result<BTreeMap<String, NoteType>> {
 }
 
 /// The kind of a note: its frontmatter `type:` (through the type table), else
-/// the longest matching path prefix in `[ledger.kinds]`, else the default.
+/// the most specific matching rule in `[ledger.kinds]`, else the default. A
+/// rule is a path prefix (`writing/`) or a glob (`projects/*/lab/**`); the
+/// longest rule that matches wins.
 pub fn kind_of(
     rel_path: &str,
     frontmatter_type: Option<&str>,
@@ -156,9 +158,19 @@ pub fn kind_of(
     }
     prefixes
         .iter()
-        .filter(|(p, _)| rel_path.starts_with(p.as_str()))
+        .filter(|(p, _)| rule_matches(p, rel_path))
         .max_by_key(|(p, _)| p.len())
         .map_or(default, |(_, k)| *k)
+}
+
+fn rule_matches(rule: &str, rel_path: &str) -> bool {
+    if rule.contains('*') {
+        globset::Glob::new(rule)
+            .map(|g| g.compile_matcher().is_match(rel_path))
+            .unwrap_or(false)
+    } else {
+        rel_path.starts_with(rule)
+    }
 }
 
 #[cfg(test)]
@@ -189,6 +201,27 @@ mod tests {
         );
         assert_eq!(
             kind_of("notes/x.md", None, &types, &prefixes, NoteKind::Chapter),
+            NoteKind::Chapter
+        );
+        prefixes.insert("projects/*/lab/**".to_string(), NoteKind::Log);
+        assert_eq!(
+            kind_of(
+                "projects/psu/lab/2026-05-10-test.md",
+                None,
+                &types,
+                &prefixes,
+                NoteKind::Chapter
+            ),
+            NoteKind::Log
+        );
+        assert_eq!(
+            kind_of(
+                "projects/psu/overview.md",
+                None,
+                &types,
+                &prefixes,
+                NoteKind::Chapter
+            ),
             NoteKind::Chapter
         );
     }

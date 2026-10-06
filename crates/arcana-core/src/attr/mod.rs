@@ -15,8 +15,8 @@ pub mod types;
 pub use attribution::{Attribution, Summary};
 pub use author::{AgentIdentity, Author, Grant, HumanVia, Origin};
 pub use ledger::{
-    word_diff, Decided, EditOutcome, EditRequest, EditResult, Ledger, NoteState, Observed, Pending,
-    UnreviewedSpan,
+    word_diff, Decided, EditOutcome, EditRequest, EditResult, ImportAs, Ledger, NoteState,
+    Observed, Pending, UnreviewedSpan,
 };
 pub use plan::{Disposition, RawEdit, Touch};
 pub use types::{NoteKind, NoteType};

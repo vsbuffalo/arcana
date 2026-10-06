@@ -209,6 +209,9 @@ impl Attribution {
         let mut s = Summary::default();
         for t in &self.tokens {
             match self.author_of(t) {
+                Author::Human {
+                    via: super::author::HumanVia::Declared,
+                } => s.declared += 1,
                 Author::Human { .. } => s.human += 1,
                 Author::Agent { .. } => s.agent += 1,
                 Author::Unattributed => s.unattributed += 1,
@@ -223,7 +226,10 @@ impl Attribution {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Summary {
+    /// Words arcana saw the human write (or accept as a light edit).
     pub human: usize,
+    /// Words the human claimed at import.
+    pub declared: usize,
     pub agent: usize,
     pub unattributed: usize,
     pub unreviewed: usize,

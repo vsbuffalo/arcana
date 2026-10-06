@@ -22,6 +22,9 @@ pub enum HumanVia {
     /// Changed on disk by something other than arcana while agents are
     /// barred from writing the vault.
     Observed,
+    /// Declared the human's at import: older writing arcana never saw being
+    /// written. Reported separately from witnessed words.
+    Declared,
 }
 
 impl HumanVia {
@@ -30,6 +33,7 @@ impl HumanVia {
             HumanVia::Editor => "editor",
             HumanVia::Review => "review",
             HumanVia::Observed => "observed",
+            HumanVia::Declared => "declared",
         }
     }
 
@@ -38,6 +42,7 @@ impl HumanVia {
             "editor" => HumanVia::Editor,
             "review" => HumanVia::Review,
             "observed" => HumanVia::Observed,
+            "declared" => HumanVia::Declared,
             _ => return None,
         })
     }

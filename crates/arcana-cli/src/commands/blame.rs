@@ -158,13 +158,13 @@ fn ledger_stats(ledger: &arcana_core::attr::Ledger, notes: &[String], json: bool
         return Ok(());
     }
     println!(
-        "{:>7} {:>7} {:>10} {:>12}  note",
-        "yours", "agent", "unreviewed", "unattributed"
+        "{:>7} {:>8} {:>7} {:>10} {:>12}  note",
+        "yours", "declared", "agent", "unreviewed", "unattributed"
     );
     for (n, k, s) in rows {
         println!(
-            "{:>7} {:>7} {:>10} {:>12}  {n} [{k}]",
-            s.human, s.agent, s.unreviewed, s.unattributed
+            "{:>7} {:>8} {:>7} {:>10} {:>12}  {n} [{k}]",
+            s.human, s.declared, s.agent, s.unreviewed, s.unattributed
         );
     }
     Ok(())
@@ -207,6 +207,9 @@ fn ledger_blame(ledger: &arcana_core::attr::Ledger, path: &str, json: bool) -> R
         let text = tok.text(&st.content);
         let shown = match a.author_of(attr) {
             Author::Human { .. } if attr.policy.is_some() => text.underline().to_string(),
+            Author::Human {
+                via: arcana_core::attr::HumanVia::Declared,
+            } => text.italic().to_string(),
             Author::Human { .. } => text.normal().to_string(),
             Author::Agent { .. } if attr.unreviewed => text.cyan().dimmed().to_string(),
             Author::Agent { .. } => text.cyan().to_string(),
@@ -218,9 +221,10 @@ fn ledger_blame(ledger: &arcana_core::attr::Ledger, path: &str, json: bool) -> R
     out.push_str(&st.content[pos..]);
     print!("{out}");
     eprintln!(
-        "\n{}  {} yours · {} agent ({} unreviewed) · {} unattributed  [{}]",
+        "\n{}  {} yours · {} declared · {} agent ({} unreviewed) · {} unattributed  [{}]",
         path.bold(),
         sum.human,
+        sum.declared,
         sum.agent.to_string().cyan(),
         sum.unreviewed,
         sum.unattributed.to_string().yellow(),
@@ -228,7 +232,7 @@ fn ledger_blame(ledger: &arcana_core::attr::Ledger, path: &str, json: bool) -> R
     );
     eprintln!(
         "{}",
-        "words: yours plain · light edits to yours underlined · agent cyan (dim = unreviewed) · unattributed yellow"
+        "words: yours plain · declared at import italic · light edits to yours underlined · agent cyan (dim = unreviewed) · unattributed yellow"
             .dimmed()
     );
     Ok(())

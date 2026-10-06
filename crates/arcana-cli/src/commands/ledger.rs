@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
+use arcana_core::attr::ImportAs;
 use arcana_core::ArcanaConfig;
 use clap::{Args, Subcommand};
 
@@ -19,11 +20,24 @@ pub enum LedgerCommand {
     /// Bring existing notes under the ledger. Their words are credited to the
     /// named agent, or marked unattributed; never to you.
     Import {
-        /// Vault-relative note paths
+        /// Vault-relative paths of notes already in this vault (without --plan)
         paths: Vec<String>,
-        /// Credit the words to this agent (e.g. "legacy-ai")
+        /// Who the words are credited to: agent:<name>, declared (yours, as
+        /// you claim at import; reported apart from words arcana saw you
+        /// write), or unattributed
+        #[arg(long = "as", default_value = "unattributed")]
+        as_: String,
+        /// Copy notes in from another directory, following a plan file:
+        /// tab-separated `from  to  as` per line, `#` comments, `-` in `to`
+        /// to skip a note. The plan is kept in .arcana/imports/.
+        #[arg(long, requires = "from")]
+        plan: Option<std::path::PathBuf>,
+        /// Directory the plan's `from` paths are relative to (e.g. the old vault)
         #[arg(long)]
-        as_agent: Option<String>,
+        from: Option<std::path::PathBuf>,
+        /// Show what would happen without writing anything
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Pending reviews, unreviewed agent text and write health
     Status {
@@ -41,10 +55,13 @@ enabled = true
 outside_edits_are_human = true
 default_kind = "chapter"
 
-# Kind of a note without a `type:`, by path prefix.
+# Kind of a note without a `type:`: a path prefix or a glob; the longest
+# matching rule wins.
 [ledger.kinds]
 "writing/" = "writing"
+"personal/" = "writing"
 "logs/" = "log"
+"projects/*/lab/**" = "log"
 "#;
 
 const GITIGNORE: &str = ".arcana/index.db
@@ -144,7 +161,16 @@ not by editing it.
 pub fn run_ledger(args: LedgerArgs, config: ArcanaConfig, json: bool) -> Result<()> {
     match args.command {
         LedgerCommand::Init => init(&config),
-        LedgerCommand::Import { paths, as_agent } => import(config, &paths, as_agent.as_deref()),
+        LedgerCommand::Import {
+            paths,
+            as_,
+            plan,
+            from,
+            dry_run,
+        } => match (plan, from) {
+            (Some(plan), Some(from)) => import_plan(config, &plan, &from, dry_run),
+            _ => import(config, &paths, &as_.parse()?),
+        },
         LedgerCommand::Status { short } => status(config, short, json),
     }
 }
@@ -209,21 +235,137 @@ fn init(config: &ArcanaConfig) -> Result<()> {
     Ok(())
 }
 
-fn import(config: ArcanaConfig, paths: &[String], as_agent: Option<&str>) -> Result<()> {
+fn import(config: ArcanaConfig, paths: &[String], as_: &ImportAs) -> Result<()> {
     let vault = arcana_core::Vault::open(config)?;
     let ledger = vault
         .ledger()
         .context("not a ledger vault (run `arcana ledger init`)")?;
     for p in paths {
-        if let Some(e) = ledger.import(p, as_agent, vault.git())? {
+        if let Some(e) = ledger.import(p, as_, vault.git())? {
             eprintln!("{p}: {e}");
         }
-        eprintln!(
-            "imported {p} as {}",
-            as_agent.map_or("unattributed".to_string(), |a| format!("agent {a}"))
-        );
+        eprintln!("imported {p} as {as_}");
     }
     vault.index()?;
+    Ok(())
+}
+
+struct PlanRow {
+    line: usize,
+    from: String,
+    to: Option<String>,
+    as_: ImportAs,
+}
+
+fn parse_plan(text: &str) -> Result<Vec<PlanRow>> {
+    let mut rows = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim_end();
+        if t.trim().is_empty() || t.trim_start().starts_with('#') {
+            continue;
+        }
+        let cols: Vec<&str> = t.split('\t').map(str::trim).collect();
+        let [from, to, as_, ..] = cols.as_slice() else {
+            bail!("plan line {}: expected `from<TAB>to<TAB>as`", i + 1);
+        };
+        rows.push(PlanRow {
+            line: i + 1,
+            from: from.to_string(),
+            to: (!to.is_empty() && *to != "-").then(|| to.to_string()),
+            as_: as_
+                .parse()
+                .with_context(|| format!("plan line {}", i + 1))?,
+        });
+    }
+    Ok(rows)
+}
+
+/// Copy notes from another directory into this vault per a plan file, each
+/// credited as the plan says, then keep the plan as the import's record.
+fn import_plan(config: ArcanaConfig, plan: &Path, from: &Path, dry_run: bool) -> Result<()> {
+    let text =
+        std::fs::read_to_string(plan).with_context(|| format!("reading {}", plan.display()))?;
+    let rows = parse_plan(&text)?;
+    let vault = arcana_core::Vault::open(config)?;
+    let ledger = vault
+        .ledger()
+        .context("not a ledger vault (run `arcana ledger init`)")?;
+
+    // Check everything before writing anything.
+    let mut problems = Vec::new();
+    let mut targets = std::collections::BTreeSet::new();
+    for r in &rows {
+        if !from.join(&r.from).is_file() {
+            problems.push(format!(
+                "line {}: {} not found under {}",
+                r.line,
+                r.from,
+                from.display()
+            ));
+        }
+        if let Some(to) = &r.to {
+            arcana_core::vault_path::validate_rel(to)
+                .map_err(|e| anyhow::anyhow!("line {}: {e}", r.line))?;
+            if vault.root().join(to).exists() {
+                problems.push(format!(
+                    "line {}: {to} already exists in this vault",
+                    r.line
+                ));
+            }
+            if !targets.insert(to.clone()) {
+                problems.push(format!("line {}: {to} is the target of two lines", r.line));
+            }
+        }
+    }
+    if !problems.is_empty() {
+        bail!(
+            "plan has problems; nothing imported:\n  {}",
+            problems.join("\n  ")
+        );
+    }
+
+    let (mut imported, mut skipped) = (0, 0);
+    for r in &rows {
+        let Some(to) = &r.to else {
+            skipped += 1;
+            continue;
+        };
+        if dry_run {
+            eprintln!("would import {} → {to} as {}", r.from, r.as_);
+            imported += 1;
+            continue;
+        }
+        let dest = vault.root().join(to);
+        if let Some(dir) = dest.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::copy(from.join(&r.from), &dest)?;
+        if let Some(e) = ledger.import(to, &r.as_, vault.git())? {
+            eprintln!("{to}: {e}");
+        }
+        imported += 1;
+    }
+    if dry_run {
+        eprintln!("{imported} to import, {skipped} skipped (dry run; nothing written)");
+        return Ok(());
+    }
+
+    let name = plan
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("import.tsv");
+    let record = format!(".arcana/imports/{name}");
+    let header = format!("# imported from {} into this vault\n", from.display());
+    write_new(&vault.root().join(&record), &format!("{header}{text}"))?;
+    if let Some(git) = vault.git() {
+        git.commit_paths(
+            &[Path::new(&record)],
+            &format!("arcana: record import plan {name}"),
+            true,
+        )?;
+    }
+    vault.index()?;
+    eprintln!("{imported} imported, {skipped} skipped; plan kept at {record}");
     Ok(())
 }
 
