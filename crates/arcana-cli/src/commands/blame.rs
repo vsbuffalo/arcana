@@ -14,7 +14,7 @@ pub struct BlameArgs {
     #[arg(long)]
     pub stats: bool,
 
-    /// When used with --stats, show stats for all notes
+    /// With --stats and a path, still report the whole vault (--stats alone does too)
     #[arg(long)]
     pub all: bool,
 }
@@ -45,7 +45,7 @@ pub fn run_blame(args: BlameArgs, config: ArcanaConfig, json: bool) -> Result<()
         .git()
         .ok_or_else(|| anyhow::anyhow!("git is not enabled for this vault"))?;
 
-    if args.stats && args.all {
+    if args.stats && (args.all || args.path.is_none()) {
         // Vault-wide provenance report
         vault.index()?;
         let results = vault.list(&arcana_core::SearchFilters::default(), 10000)?;
@@ -90,7 +90,7 @@ pub fn run_blame(args: BlameArgs, config: ArcanaConfig, json: bool) -> Result<()
     let path = args
         .path
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("path is required (use --all for vault-wide stats)"))?;
+        .ok_or_else(|| anyhow::anyhow!("give a note path, or --stats for the whole vault"))?;
 
     if args.stats {
         let prov = git.provenance(path)?;
