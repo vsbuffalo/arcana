@@ -909,11 +909,20 @@ impl Ledger {
 }
 
 /// Contiguous unreviewed runs of a note, as byte spans.
+/// Spans break at headings, so a new chapter is reviewed section by section.
 fn unreviewed_spans(st: &NoteState) -> Vec<UnreviewedSpan> {
     let toks = tokenize(&st.content);
+    let headings: std::collections::HashSet<usize> = blocks(&st.content)
+        .iter()
+        .filter(|b| b.kind == super::blocks::BlockKind::Heading)
+        .map(|b| b.start)
+        .collect();
     let mut out: Vec<UnreviewedSpan> = Vec::new();
     let mut prev_unreviewed = false;
     for (t, a) in toks.iter().zip(&st.attribution.tokens) {
+        if headings.contains(&t.start) {
+            prev_unreviewed = false;
+        }
         if a.unreviewed {
             let (agent, request) = match st.attribution.author_of(a) {
                 Author::Agent { agent, request, .. } => (agent.clone(), request.clone()),
@@ -1260,5 +1269,25 @@ mod tests {
             std::fs::read_to_string(dir.path().join("n.md")).unwrap(),
             "Mine entirely.\n"
         );
+    }
+
+    #[test]
+    fn unreviewed_text_splits_at_headings() {
+        let dir = tempfile::tempdir().unwrap();
+        let l = ledger(dir.path());
+        l.agent_create(
+            None,
+            Some("c.md"),
+            "T",
+            &BTreeMap::new(),
+            Some("## One\n\nFirst section.\n\n## Two\n\nSecond section."),
+            None,
+            agent(),
+            None,
+        )
+        .unwrap();
+        let spans = l.unreviewed().unwrap();
+        assert_eq!(spans.len(), 3, "{spans:?}"); // frontmatter, One, Two
+        assert!(spans[2].text.starts_with("## Two"));
     }
 }
