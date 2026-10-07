@@ -46,7 +46,7 @@ All AI output lands in drafts, never directly in the vault. `arcana review` show
 
 - `cargo clippy -- -D warnings` must pass (CI enforces this)
 - `cargo fmt --check` must pass
-- MSRV: 1.80
+- MSRV: 1.89
 - Edition: 2021
 - Commit messages: conventional-ish, short lowercase subject with bullet-point body listing features and internals. See git log for examples.
 - Git: always rebase when possible, prefer linear history over merge commits.
