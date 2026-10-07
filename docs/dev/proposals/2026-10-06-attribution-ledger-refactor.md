@@ -488,9 +488,9 @@ write boundary, and the history replay for existing vaults.
 1. Attribution truth is the per-note sidecar, per word, with a content hash.
 2. The review unit is the section; edits to your words are decided one at a
    time.
-3. Agent changes to existing text and all suggestions to your words are
-   gated; new agent text in chapters lands marked *unreviewed*. Configurable
-   per note kind.
+3. Agent text (new or edited) is written immediately and marked
+   unreviewed; only changes touching your words wait for you. Holding agent
+   edits for review is a switch (`[ledger] review_agent_edits = true`).
 4. `light-edit@1` is the publishing policy; `attest` also reports the strict
    reading.
 5. An edit outside arcana is yours while the sandbox boundary holds.

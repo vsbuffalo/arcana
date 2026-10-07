@@ -72,12 +72,14 @@ struct App {
     /// Pane areas from the last draw, for mouse hit-testing and paging.
     list_area: Rect,
     detail_area: Rect,
+    /// Also list agent text applied without review (`--unreviewed`).
+    include_unreviewed: bool,
 }
 
 /// Lines the mouse wheel scrolls per notch.
 const WHEEL_LINES: i32 = 3;
 
-pub fn run(vault: Vault) -> Result<()> {
+pub fn run(vault: Vault, include_unreviewed: bool) -> Result<()> {
     let mut app = App {
         items: Vec::new(),
         list: ListState::default(),
@@ -89,10 +91,17 @@ pub fn run(vault: Vault) -> Result<()> {
         detail_lines: 0,
         list_area: Rect::default(),
         detail_area: Rect::default(),
+        include_unreviewed,
     };
     reload(&vault, &mut app)?;
     if app.items.is_empty() {
-        eprintln!("nothing to review");
+        if include_unreviewed {
+            eprintln!("nothing to review");
+        } else {
+            eprintln!(
+                "no decisions waiting (agent text you have not read: arcana review --unreviewed)"
+            );
+        }
         return Ok(());
     }
     let mut terminal = start_terminal();
@@ -152,7 +161,9 @@ fn reload(vault: &Vault, app: &mut App) -> Result<()> {
         .into_iter()
         .map(|p| Item::Pending(Box::new(p)))
         .collect();
-    items.extend(l.unreviewed()?.into_iter().map(Item::Unreviewed));
+    if app.include_unreviewed {
+        items.extend(l.unreviewed()?.into_iter().map(Item::Unreviewed));
+    }
     app.items = items;
     let sel = app.list.selected().unwrap_or(0);
     app.list.select(if app.items.is_empty() {
@@ -519,6 +530,7 @@ mod tests {
             detail_lines: 0,
             list_area: Rect::default(),
             detail_area: Rect::default(),
+            include_unreviewed: true,
         };
         let mut term = Terminal::new(TestBackend::new(120, 20)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();
@@ -582,6 +594,7 @@ mod tests {
             detail_lines: 0,
             list_area: Rect::default(),
             detail_area: Rect::default(),
+            include_unreviewed: true,
         };
         let mut term = Terminal::new(TestBackend::new(100, 20)).unwrap();
         term.draw(|f| draw(f, &mut app)).unwrap();

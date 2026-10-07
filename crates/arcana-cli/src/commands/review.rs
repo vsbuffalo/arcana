@@ -9,6 +9,10 @@ use crate::output::is_stderr_tty;
 
 #[derive(Args)]
 pub struct ReviewArgs {
+    /// Ledger vault: also browse agent text written without review
+    #[arg(long)]
+    pub unreviewed: bool,
+
     /// [legacy] List all sessions with pending drafts
     #[arg(long)]
     pub list: bool,
@@ -46,7 +50,7 @@ pub fn run_review(
         {
             anyhow::bail!("draft-session flags apply to legacy vaults; this vault is reviewed interactively with `arcana review`");
         }
-        return crate::commands::review_tui::run(vault);
+        return crate::commands::review_tui::run(vault, args.unreviewed);
     }
     if !json {
         crate::output::print_git_init_info(&vault);

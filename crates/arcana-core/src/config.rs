@@ -267,6 +267,11 @@ pub struct LedgerConfig {
     /// Kind for notes without a `type:`; by longest matching path prefix.
     pub kinds: std::collections::BTreeMap<String, crate::attr::NoteKind>,
     pub default_kind: crate::attr::NoteKind,
+    /// Hold an agent's edits to its own earlier text (in chapters and
+    /// writing notes) for review. Off by default: such edits are written at
+    /// once, marked unreviewed. Changes touching the human's words are always
+    /// held as suggestions, whatever this says.
+    pub review_agent_edits: bool,
 }
 
 impl Default for LedgerConfig {
@@ -276,6 +281,7 @@ impl Default for LedgerConfig {
             outside_edits_are_human: true,
             kinds: Default::default(),
             default_kind: crate::attr::NoteKind::Chapter,
+            review_agent_edits: false,
         }
     }
 }

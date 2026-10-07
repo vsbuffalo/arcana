@@ -506,7 +506,7 @@ impl Ledger {
                 }
             };
             let t = touch(&st.content, &st.attribution, &r);
-            let d = dispose(st.kind, t);
+            let d = dispose(st.kind, t, self.cfg.review_agent_edits);
             let mut pending_id = None;
             match &d {
                 Disposition::Apply => {
@@ -1434,5 +1434,49 @@ mod tests {
         .unwrap();
         // No observe(): an ordinary read must still find the moved note's authors.
         assert!(classes(&l, "notes/a.md").chars().all(|c| c == 'A'));
+    }
+
+    #[test]
+    fn agent_edits_to_agent_text_apply_unless_review_is_on() {
+        let edit = |l: &Ledger| {
+            l.agent_edit(
+                EditRequest {
+                    note: "c.md".into(),
+                    base: None,
+                    request: None,
+                    rationale: None,
+                    edits: vec![RawEdit::Replace {
+                        find: "Agent body.".into(),
+                        with: "Refined agent body.".into(),
+                    }],
+                },
+                agent(),
+                None,
+            )
+            .unwrap()
+            .results[0]
+                .disposition
+                .clone()
+        };
+        for (review, expected) in [(false, Disposition::Apply), (true, Disposition::Gate)] {
+            let dir = tempfile::tempdir().unwrap();
+            let cfg = LedgerConfig {
+                review_agent_edits: review,
+                ..LedgerConfig::default()
+            };
+            let l = Ledger::open(dir.path(), &cfg).unwrap();
+            l.agent_create(
+                None,
+                Some("c.md"),
+                "T",
+                &BTreeMap::new(),
+                Some("Agent body."),
+                None,
+                agent(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(edit(&l), expected);
+        }
     }
 }

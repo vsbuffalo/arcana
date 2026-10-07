@@ -260,7 +260,7 @@ impl ArcanaServer {
 
     #[tool(
         name = "vault_edit",
-        description = "Edit a note with text-anchored operations. You never overwrite a note. New paragraphs in chapters are written immediately (marked unreviewed); changes to existing agent text are queued for the user's review; anything touching the user's own words becomes a suggestion they accept or reject. Returns what happened to each edit and a word diff of what was written."
+        description = "Edit a note with text-anchored operations. You never overwrite a note. In chapters, new text and changes to agent-written text are written immediately (marked unreviewed). Anything touching the user's own words becomes a suggestion they accept or reject; keep those small and specific. Returns what happened to each edit and a word diff of what was written."
     )]
     async fn ledger_edit(
         &self,

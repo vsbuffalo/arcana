@@ -468,16 +468,18 @@ fn status(config: ArcanaConfig, short: bool, json: bool) -> Result<()> {
         );
     } else if short {
         let mut parts = Vec::new();
-        if pending + unreviewed > 0 {
-            parts.push(format!("✎{}", pending + unreviewed));
+        // Only decisions that need the human; unreviewed agent text is
+        // browsable but never nags.
+        if pending > 0 {
+            parts.push(format!("✎{pending}"));
         }
         if health.is_some() {
             parts.push("⚠git".into());
         }
         println!("{}", parts.join(" "));
     } else {
-        println!("pending changes:     {pending}");
-        println!("unreviewed passages: {unreviewed}");
+        println!("waiting for you:     {pending}   (arcana review)");
+        println!("unreviewed passages: {unreviewed}   (arcana review --unreviewed)");
         println!("write health:        {}", health.as_deref().unwrap_or("ok"));
     }
     Ok(())

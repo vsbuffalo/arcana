@@ -199,9 +199,13 @@ pub enum Disposition {
     },
 }
 
-pub fn dispose(kind: NoteKind, touch: Touch) -> Disposition {
+/// What happens to an edit. `review_agent_edits` holds an agent's changes to
+/// its own text for review; without it they are applied, marked unreviewed.
+/// Edits touching the human's words are always suggestions.
+pub fn dispose(kind: NoteKind, touch: Touch, review_agent_edits: bool) -> Disposition {
     use Disposition::*;
     match (kind, touch) {
+        (NoteKind::Chapter, Touch::AgentText) if !review_agent_edits => Apply,
         (_, Touch::Frontmatter) => Refuse {
             reason: "agents cannot edit frontmatter".into(),
         },
