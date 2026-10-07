@@ -40,6 +40,9 @@ pub enum LedgerCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Attribute and commit every outstanding change now (the server also
+    /// does this every few minutes)
+    Sync,
     /// Pending reviews, unreviewed agent text and write health
     Status {
         /// One short line for a tmux status bar
@@ -174,6 +177,17 @@ pub fn run_ledger(args: LedgerArgs, config: ArcanaConfig, json: bool) -> Result<
             _ => import(config, &paths, &as_.parse()?),
         },
         LedgerCommand::Status { short } => status(config, short, json),
+        LedgerCommand::Sync => {
+            let vault = arcana_core::Vault::open(config)?;
+            let ledger = vault.ledger().context("not a ledger vault")?;
+            let git = vault.git().context("git is not enabled for this vault")?;
+            let (paths, err) = ledger.sync(git)?;
+            if let Some(e) = err {
+                bail!("{e}");
+            }
+            eprintln!("committed {} outstanding paths", paths.len());
+            Ok(())
+        }
     }
 }
 

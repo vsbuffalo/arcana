@@ -696,6 +696,21 @@ impl VaultGit {
     }
 
     /// Check if repo has any uncommitted changes.
+    /// Vault-relative paths that differ from HEAD in the working tree:
+    /// modified, deleted, or new (untracked, recursing into new folders).
+    /// Ignored files are excluded.
+    pub fn changed_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut opts = StatusOptions::new();
+        opts.show(StatusShow::IndexAndWorkdir);
+        opts.include_untracked(true);
+        opts.recurse_untracked_dirs(true);
+        let statuses = self.repo.statuses(Some(&mut opts)).map_err(git_err)?;
+        Ok(statuses
+            .iter()
+            .filter_map(|s| s.path().map(PathBuf::from))
+            .collect())
+    }
+
     pub fn has_changes(&self) -> Result<bool> {
         let mut opts = StatusOptions::new();
         opts.show(StatusShow::IndexAndWorkdir);

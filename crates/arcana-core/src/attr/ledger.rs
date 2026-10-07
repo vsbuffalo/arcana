@@ -892,6 +892,35 @@ impl Ledger {
         self.commit(git, paths, &msg, true)
     }
 
+    /// Attribute and commit every outstanding change in the vault: notes
+    /// edited, added, moved or deleted outside arcana, and the sidecars that
+    /// go with them. Driven by git's view of the working tree, so nothing is
+    /// lost if the process that saw a change restarts before committing it.
+    /// Returns the paths committed, or the commit error.
+    pub fn sync(&self, git: &VaultGit) -> Result<(Vec<PathBuf>, Option<String>)> {
+        let is_note = |p: &Path| {
+            p.extension().and_then(|e| e.to_str()) == Some("md")
+                && !p
+                    .components()
+                    .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        };
+        for p in git.changed_paths()? {
+            if is_note(&p) {
+                if let Some(rel) = p.to_str() {
+                    self.observe(rel)?;
+                }
+            }
+        }
+        self.sweep_orphans()?;
+        let paths: Vec<PathBuf> = git
+            .changed_paths()?
+            .into_iter()
+            .filter(|p| is_note(p) || p.starts_with(".arcana/attr"))
+            .collect();
+        let err = self.commit_observed(&paths, Some(git));
+        Ok((paths, err))
+    }
+
     /// Create a note from outside the agent path (the `arcana create` CLI).
     /// Its words are attributed exactly like an edit made in an editor: the
     /// human's while the write boundary holds, unattributed otherwise.

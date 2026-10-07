@@ -100,3 +100,55 @@ fn human_commit_message_uses_vault_relative_paths() {
         .to_string();
     assert_eq!(msg, "vault: update notes/a.md");
 }
+
+#[test]
+fn ledger_sync_commits_changes_no_process_remembered() {
+    use arcana_core::attr::{AgentIdentity, Grant, Ledger};
+    use arcana_core::config::LedgerConfig;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let (git, _) = VaultGit::open_or_init(root, &cfg()).unwrap();
+    let ledger = Ledger::open(root, &LedgerConfig::default()).unwrap();
+    let agent = Grant::agent(AgentIdentity {
+        agent: "a".into(),
+        session: "s".into(),
+    });
+    ledger
+        .agent_create(
+            None,
+            Some("old/n.md"),
+            "T",
+            &Default::default(),
+            Some("Agent words here."),
+            None,
+            agent,
+            Some(&git),
+        )
+        .unwrap();
+    // Moved while nothing was watching (or the watcher restarted).
+    std::fs::create_dir_all(root.join("new")).unwrap();
+    std::fs::rename(root.join("old/n.md"), root.join("new/n.md")).unwrap();
+    std::fs::write(root.join("mine.md"), "Typed in Obsidian.\n").unwrap();
+
+    let (paths, err) = ledger.sync(&git).unwrap();
+    assert!(err.is_none(), "{err:?}");
+    assert!(!paths.is_empty());
+    let left = git.changed_paths().unwrap();
+    assert!(
+        left.iter()
+            .all(|p| p.starts_with(".arcana") && !p.starts_with(".arcana/attr")),
+        "notes and sidecars committed; left: {left:?}"
+    );
+    let moved = ledger.state("new/n.md").unwrap();
+    assert!(moved
+        .attribution
+        .tokens
+        .iter()
+        .all(|t| moved.attribution.author_of(t).is_agent()));
+    let mine = ledger.state("mine.md").unwrap();
+    assert!(mine
+        .attribution
+        .tokens
+        .iter()
+        .all(|t| mine.attribution.author_of(t).is_human()));
+}

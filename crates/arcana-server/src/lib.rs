@@ -770,104 +770,108 @@ fn start_watcher(
 
                 loop {
                     tokio::select! {
-                        Some(paths) = rx.recv() => {
-                            // Reindex immediately — keeps search fresh
-                            let vault = vault.lock().await;
-                            if let Some(ledger) = vault.ledger() {
-                                // Ledger vault: attribute outside edits now,
-                                // commit them in batches on the timer.
-                                for p in &paths {
-                                    let Some(rel) = p
-                                        .strip_prefix(vault.root())
-                                        .ok()
-                                        .and_then(|r| r.to_str())
-                                    else {
-                                        continue;
-                                    };
-                                    match ledger.observe(rel) {
-                                        Ok(arcana_core::attr::Observed::Unchanged) => {}
-                                        Ok(
-                                            arcana_core::attr::Observed::Updated { paths: changed }
-                                            | arcana_core::attr::Observed::Deleted { paths: changed }
-                                            | arcana_core::attr::Observed::Renamed { paths: changed, .. },
-                                        ) => {
-                                            for c in changed {
-                                                if !ledger_dirty.contains(&c) {
-                                                    ledger_dirty.push(c);
+                                            Some(paths) = rx.recv() => {
+                                                // Reindex immediately — keeps search fresh
+                                                let vault = vault.lock().await;
+                                                if let Some(ledger) = vault.ledger() {
+                                                    // Ledger vault: attribute outside edits now,
+                                                    // commit them in batches on the timer.
+                                                    for p in &paths {
+                                                        let Some(rel) = p
+                                                            .strip_prefix(vault.root())
+                                                            .ok()
+                                                            .and_then(|r| r.to_str())
+                                                        else {
+                                                            continue;
+                                                        };
+                                                        match ledger.observe(rel) {
+                                                            Ok(arcana_core::attr::Observed::Unchanged) => {}
+                                                            Ok(
+                                                                arcana_core::attr::Observed::Updated { paths: changed }
+                                                                | arcana_core::attr::Observed::Deleted { paths: changed }
+                                                                | arcana_core::attr::Observed::Renamed { paths: changed, .. },
+                                                            ) => {
+                                                                for c in changed {
+                                                                    if !ledger_dirty.contains(&c) {
+                                                                        ledger_dirty.push(c);
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(e) => warn!("ledger: could not attribute {rel}: {e}"),
+                                                        }
+                                                    }
+                                                    let _ = vault.reindex_paths(&paths);
+                                                    continue;
+                                                }
+                                                match vault.reindex_paths(&paths) {
+                                                    Ok(stats) => {
+                                                        if stats.notes_added > 0
+                                                            || stats.notes_updated > 0
+                                                            || stats.notes_removed > 0
+                                                        {
+                                                            info!(
+                                                                "watcher reindex: +{} ~{} -{} notes",
+                                                                stats.notes_added, stats.notes_updated, stats.notes_removed
+                                                            );
+                                                            // Accumulate for periodic commit
+                                                            for p in &paths {
+                                                                if !dirty_paths.contains(p) {
+                                                                    dirty_paths.push(p.clone());
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => warn!("watcher reindex failed: {e}"),
                                                 }
                                             }
-                                        }
-                                        Err(e) => warn!("ledger: could not attribute {rel}: {e}"),
-                                    }
-                                }
-                                let _ = vault.reindex_paths(&paths);
-                                continue;
-                            }
-                            match vault.reindex_paths(&paths) {
-                                Ok(stats) => {
-                                    if stats.notes_added > 0
-                                        || stats.notes_updated > 0
-                                        || stats.notes_removed > 0
-                                    {
-                                        info!(
-                                            "watcher reindex: +{} ~{} -{} notes",
-                                            stats.notes_added, stats.notes_updated, stats.notes_removed
-                                        );
-                                        // Accumulate for periodic commit
-                                        for p in &paths {
-                                            if !dirty_paths.contains(p) {
-                                                dirty_paths.push(p.clone());
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => warn!("watcher reindex failed: {e}"),
-                            }
-                        }
-                        _ = commit_timer.tick() => {
-                            let vault = vault.lock().await;
-                            if let Some(ledger) = vault.ledger() {
-                                match ledger.sweep_orphans() {
-                                    Ok(removed) => ledger_dirty.extend(removed),
-                                    Err(e) => warn!("ledger: orphan sweep failed: {e}"),
-                                }
-                                if let Some(e) = ledger.commit_observed(&ledger_dirty, vault.git()) {
-                                    warn!("ledger: {e}");
-                                } else {
-                                    ledger_dirty.clear();
-                                }
-                                continue;
-                            }
-                            if let Some(git) = vault.git() {
-                                // Adopt any untracked .md files (created outside arcana)
-                                match git.adopt_untracked() {
-                                    Ok(Some(n)) => info!("git: adopted {n} untracked notes"),
-                                    Ok(None) => {}
-                                    Err(e) => warn!("git adopt failed: {e}"),
-                                }
+                                            _ = commit_timer.tick() => {
+                                                let vault = vault.lock().await;
+                    if let Some(ledger) = vault.ledger() {
+                                                    // git's view of the tree, not this process's
+                                                    // memory, decides what is outstanding.
+                                                    if let Some(git) = vault.git() {
+                                                        match ledger.sync(git) {
+                                                            Ok((paths, None)) if !paths.is_empty() => {
+                                                                info!("ledger: committed {} outstanding paths", paths.len());
+                                                            }
+                                                            Ok((_, Some(e))) => warn!("ledger: {e}"),
+                                                            Ok(_) => {}
+                                                            Err(e) => warn!("ledger: sync failed: {e}"),
+                                                        }
+                                                    }
+                                                    ledger_dirty.clear();
+                                                    continue;
+                                                }
+                                                if let Some(git) = vault.git() {
+                                                    // Adopt any untracked .md files (created outside arcana)
+                                                    match git.adopt_untracked() {
+                                                        Ok(Some(n)) => info!("git: adopted {n} untracked notes"),
+                                                        Ok(None) => {}
+                                                        Err(e) => warn!("git adopt failed: {e}"),
+                                                    }
 
-                                // Commit accumulated dirty paths
-                                if !dirty_paths.is_empty() {
-                                    match git.commit_human_change(&dirty_paths) {
-                                        Ok(Some(_)) => {
-                                            let msg = describe_changes(&dirty_paths);
-                                            info!("git: {msg}");
-                                            dirty_paths.clear();
+                                                    // Commit accumulated dirty paths
+                                                    if !dirty_paths.is_empty() {
+                                                        match git.commit_human_change(&dirty_paths) {
+                                                            Ok(Some(_)) => {
+                                                                let msg = describe_changes(&dirty_paths);
+                                                                info!("git: {msg}");
+                                                                dirty_paths.clear();
+                                                            }
+                                                            Ok(None) => {
+                                                                // all AI-written, nothing to commit
+                                                                dirty_paths.clear();
+                                                            }
+                                                            Err(e) => {
+                                                                // Retain dirty_paths for retry on next tick
+                                                                warn!("git commit failed: {e}");
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            else => break,
                                         }
-                                        Ok(None) => {
-                                            // all AI-written, nothing to commit
-                                            dirty_paths.clear();
-                                        }
-                                        Err(e) => {
-                                            // Retain dirty_paths for retry on next tick
-                                            warn!("git commit failed: {e}");
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        else => break,
-                    }
                 }
             });
 
