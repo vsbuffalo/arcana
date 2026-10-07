@@ -83,9 +83,15 @@ impl NoteType {
     pub fn render_path(&self, title: &str, fields: &BTreeMap<String, String>) -> Result<String> {
         let mut path = self.path.clone();
         let date = chrono::Local::now().format("%Y-%m-%d").to_string();
-        path = path
-            .replace("{date}", &date)
-            .replace("{slug}", &slugify(title));
+        // A title that already starts with a date ("2026-10-06 — Steak tacos")
+        // must not produce "2026-10-06-2026-10-06-steak-tacos".
+        let mut slug = slugify(title);
+        if path.contains("{date}") {
+            if let Some(rest) = slug.strip_prefix(&date).or_else(|| strip_iso_date(&slug)) {
+                slug = rest.trim_start_matches('-').to_string();
+            }
+        }
+        path = path.replace("{date}", &date).replace("{slug}", &slug);
         for (k, v) in fields {
             path = path.replace(&format!("{{{k}}}"), &slugify(v));
         }
@@ -102,6 +108,19 @@ impl NoteType {
         }
         Ok(path)
     }
+}
+
+/// `slug` without a leading `YYYY-MM-DD`, if it has one.
+fn strip_iso_date(slug: &str) -> Option<&str> {
+    let b = slug.as_bytes();
+    let digits =
+        |r: std::ops::Range<usize>| b.get(r).is_some_and(|x| x.iter().all(u8::is_ascii_digit));
+    (digits(0..4)
+        && b.get(4) == Some(&b'-')
+        && digits(5..7)
+        && b.get(7) == Some(&b'-')
+        && digits(8..10))
+    .then(|| &slug[10..])
 }
 
 pub fn slugify(s: &str) -> String {
@@ -188,6 +207,9 @@ mod tests {
         assert!(p.starts_with("projects/bench-psu-12v/lab/"));
         assert!(p.ends_with("-ripple-fft-run-2.md"));
         assert!(t.render_path("x", &BTreeMap::new()).is_err());
+        let p = t.render_path("2026-01-02 — Steak tacos v1", &f).unwrap();
+        assert!(p.ends_with("-steak-tacos-v1.md"), "{p}");
+        assert_eq!(p.matches("2026-01-02").count(), 0, "{p}");
     }
 
     #[test]
