@@ -27,7 +27,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::{info, warn};
 
 const AUTH_CODE_TTL: Duration = Duration::from_secs(120);
 const ACCESS_TOKEN_TTL: Duration = Duration::from_secs(86400);
@@ -102,6 +102,7 @@ pub async fn metadata(headers: axum::http::HeaderMap) -> impl IntoResponse {
         grant_types_supported: vec!["authorization_code".into()],
         code_challenge_methods_supported: vec!["S256".into()],
         token_endpoint_auth_methods_supported: vec![
+            "none".into(),
             "client_secret_post".into(),
             "client_secret_basic".into(),
         ],
@@ -145,17 +146,75 @@ struct RegisterResponse {
     redirect_uris: Vec<String>,
 }
 
+/// Register a public client (no secret), as MCP clients such as ChatGPT do.
+///
+/// The client id is derived from the redirect URI with a keyed hash, so no
+/// registry has to be stored and the id cannot be used with any other
+/// redirect URI. Public clients are safe here because every authorization
+/// still needs the owner's password and PKCE binds the code to the client.
 pub async fn register(
     State(state): State<OAuthState>,
     axum::Json(body): axum::Json<RegisterRequest>,
-) -> impl IntoResponse {
-    axum::Json(RegisterResponse {
-        client_id: state.config.client_id.clone(),
-        client_secret: None,
-        client_id_issued_at: 0,
-        client_secret_expires_at: 0,
-        redirect_uris: body.redirect_uris.unwrap_or_default(),
-    })
+) -> Response {
+    let uris = body.redirect_uris.unwrap_or_default();
+    let Some(first) = uris.first() else {
+        return error_json(StatusCode::BAD_REQUEST, "invalid_redirect_uri");
+    };
+    if !uris.iter().all(|u| is_valid_redirect_uri(u)) {
+        warn!("oauth register rejected: redirect_uri not https or loopback");
+        return error_json(StatusCode::BAD_REQUEST, "invalid_redirect_uri");
+    }
+    let client_id = public_client_id(&state.config.client_secret, first);
+    info!(
+        client = body.client_name.as_deref().unwrap_or("?"),
+        redirect_host = redirect_host(first),
+        "oauth: registered public client"
+    );
+    (
+        StatusCode::CREATED,
+        axum::Json(RegisterResponse {
+            client_id,
+            client_secret: None,
+            client_id_issued_at: 0,
+            client_secret_expires_at: 0,
+            redirect_uris: vec![first.clone()],
+        }),
+    )
+        .into_response()
+}
+
+/// `pub-` + HMAC-SHA256(server secret, redirect URI), hex, truncated.
+fn public_client_id(secret: &str, redirect_uri: &str) -> String {
+    let mac = hmac_sha256(secret.as_bytes(), redirect_uri.as_bytes());
+    let hex: String = mac.iter().take(16).map(|b| format!("{b:02x}")).collect();
+    format!("pub-{hex}")
+}
+
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut k = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        k[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let pad = |b: u8| k.map(|x| x ^ b);
+    let inner = Sha256::new()
+        .chain_update(pad(0x36))
+        .chain_update(msg)
+        .finalize();
+    Sha256::new()
+        .chain_update(pad(0x5c))
+        .chain_update(inner)
+        .finalize()
+        .into()
+}
+
+fn redirect_host(uri: &str) -> &str {
+    uri.split("://")
+        .nth(1)
+        .and_then(|r| r.split('/').next())
+        .unwrap_or("?")
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +279,10 @@ pub async fn authorize_submit(
     axum::Form(form): axum::Form<AuthorizeSubmit>,
 ) -> Response {
     if !ct_eq(&form.password, &state.config.password) {
+        warn!(
+            redirect_host = redirect_host(&form.redirect_uri),
+            "oauth: wrong password at authorize"
+        );
         return (StatusCode::UNAUTHORIZED, "Invalid password").into_response();
     }
 
@@ -254,6 +317,10 @@ pub async fn authorize_submit(
         }
     }
 
+    info!(
+        redirect_host = redirect_host(&form.redirect_uri),
+        "oauth: authorized, code issued"
+    );
     Redirect::to(&url).into_response()
 }
 
@@ -290,20 +357,31 @@ pub async fn token(
         return error_json(StatusCode::BAD_REQUEST, "unsupported_grant_type");
     }
 
-    // Extract client credentials from body or Basic auth header
-    let (client_id, client_secret) =
-        match extract_client_credentials(&headers, &form.client_id, &form.client_secret) {
-            Some(creds) => creds,
-            None => return error_json(StatusCode::UNAUTHORIZED, "missing client credentials"),
-        };
-
-    // Evaluate both before combining so the check doesn't short-circuit on the
-    // client_id and leak (via timing) whether the secret was even compared.
-    let id_ok = ct_eq(&client_id, &state.config.client_id);
-    let secret_ok = ct_eq(&client_secret, &state.config.client_secret);
-    if !(id_ok && secret_ok) {
-        return error_json(StatusCode::UNAUTHORIZED, "invalid_client");
-    }
+    // A confidential client (the configured id and secret, as entered by hand
+    // in claude.ai) authenticates with its secret. A public client registered
+    // through /register sends only its id, which is checked against the
+    // redirect URI bound to the code below.
+    let creds = extract_client_credentials(&headers, &form.client_id, &form.client_secret);
+    let public_id = match creds {
+        Some((client_id, client_secret)) => {
+            // Evaluate both before combining so the check doesn't short-circuit
+            // on the client_id and leak (via timing) whether the secret was compared.
+            let id_ok = ct_eq(&client_id, &state.config.client_id);
+            let secret_ok = ct_eq(&client_secret, &state.config.client_secret);
+            if !(id_ok && secret_ok) {
+                warn!("oauth token: invalid confidential client credentials");
+                return error_json(StatusCode::UNAUTHORIZED, "invalid_client");
+            }
+            None
+        }
+        None => match form.client_id.as_deref() {
+            Some(id) if id.starts_with("pub-") => Some(id.to_string()),
+            _ => {
+                warn!("oauth token: no client credentials and no public client id");
+                return error_json(StatusCode::UNAUTHORIZED, "invalid_client");
+            }
+        },
+    };
 
     let code = match &form.code {
         Some(c) => c,
@@ -327,7 +405,16 @@ pub async fn token(
     };
 
     if stored.created_at.elapsed() > AUTH_CODE_TTL {
+        warn!("oauth token: code expired");
         return error_json(StatusCode::BAD_REQUEST, "invalid_grant");
+    }
+
+    if let Some(id) = &public_id {
+        let expected = public_client_id(&state.config.client_secret, &stored.redirect_uri);
+        if !ct_eq(id, &expected) {
+            warn!("oauth token: public client id does not match the code's redirect_uri");
+            return error_json(StatusCode::UNAUTHORIZED, "invalid_client");
+        }
     }
 
     // Defense-in-depth (PKCE below is the primary binding): if the client sends a
@@ -360,6 +447,15 @@ pub async fn token(
         );
     }
 
+    info!(
+        client = if public_id.is_some() {
+            "public"
+        } else {
+            "confidential"
+        },
+        redirect_host = redirect_host(&stored.redirect_uri),
+        "oauth: access token issued"
+    );
     axum::Json(TokenResponse {
         access_token,
         token_type: "bearer".into(),
@@ -537,5 +633,129 @@ mod tests {
         // Plain HTTP to a non-loopback host, and non-http schemes.
         assert!(!is_valid_redirect_uri("http://evil.com/cb"));
         assert!(!is_valid_redirect_uri("ftp://localhost/cb"));
+    }
+
+    // RFC 4231, test case 2.
+    #[test]
+    fn hmac_sha256_matches_rfc4231() {
+        let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    fn state() -> OAuthState {
+        OAuthState::new(
+            OAuthConfig {
+                client_id: "cid".into(),
+                client_secret: "server-secret".into(),
+                password: "pw".into(),
+            },
+            None,
+        )
+    }
+
+    async fn body_json(r: Response) -> (StatusCode, serde_json::Value) {
+        let status = r.status();
+        let bytes = axum::body::to_bytes(r.into_body(), 1 << 16).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    /// The flow ChatGPT uses: register (no secret) → authorize with password →
+    /// token with only the public client id and PKCE verifier.
+    #[tokio::test]
+    async fn public_client_completes_the_flow_without_a_secret() {
+        let st = state();
+        let cb = "https://chatgpt.com/connector_platform_oauth_redirect";
+        let (status, reg) = body_json(
+            register(
+                State(st.clone()),
+                axum::Json(RegisterRequest {
+                    client_name: Some("ChatGPT".into()),
+                    redirect_uris: Some(vec![cb.into()]),
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let client_id = reg["client_id"].as_str().unwrap().to_string();
+        assert!(client_id.starts_with("pub-"));
+        assert!(reg.get("client_secret").is_none());
+
+        let verifier = "a-long-random-verifier-string-for-pkce-0123456789";
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let redirect = authorize_submit(
+            State(st.clone()),
+            axum::Form(AuthorizeSubmit {
+                redirect_uri: cb.into(),
+                code_challenge: challenge,
+                state: Some("s1".into()),
+                password: "pw".into(),
+            }),
+        )
+        .await;
+        let loc = redirect.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let code = loc
+            .split("code=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap()
+            .to_string();
+
+        let token_req = |id: &str| TokenRequest {
+            grant_type: "authorization_code".into(),
+            code: Some(code.clone()),
+            code_verifier: Some(verifier.into()),
+            client_id: Some(id.into()),
+            client_secret: None,
+            redirect_uri: Some(cb.into()),
+        };
+        // A public id minted for a different redirect URI is refused.
+        let other = public_client_id("server-secret", "https://evil.example/cb");
+        let (status, _) = body_json(
+            token(
+                State(st.clone()),
+                Default::default(),
+                axum::Form(token_req(&other)),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // Codes are single-use, so the refused attempt spent that one; mint a
+        // fresh code for the real client.
+        let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let redirect = authorize_submit(
+            State(st.clone()),
+            axum::Form(AuthorizeSubmit {
+                redirect_uri: cb.into(),
+                code_challenge: challenge,
+                state: None,
+                password: "pw".into(),
+            }),
+        )
+        .await;
+        let loc = redirect.headers()[header::LOCATION]
+            .to_str()
+            .unwrap()
+            .to_string();
+        let code2 = loc.split("code=").nth(1).unwrap().to_string();
+        let mut req = token_req(&client_id);
+        req.code = Some(code2);
+        let (status, tok) =
+            body_json(token(State(st), Default::default(), axum::Form(req)).await).await;
+        assert_eq!(status, StatusCode::OK, "{tok}");
+        assert!(tok["access_token"].as_str().is_some());
     }
 }
