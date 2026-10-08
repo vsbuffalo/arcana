@@ -2,6 +2,31 @@
 
 How to run Arcana as a persistent service and expose it to remote clients.
 
+## Quick setup
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vsbuffalo/arcana/main/install.sh | sh
+# or, with arcana already installed:
+arcana setup                                   # vault at ~/vault/notes
+arcana --vault ~/notes setup --public-host notes.example.com
+arcana setup --dry-run                         # show the plan only
+```
+
+`arcana setup` is idempotent: each step checks the current state and does
+only what is missing. It
+
+1. creates the vault (with word-level attribution enabled) if needed and
+   points `~/.config/arcana/config.toml` at it;
+2. writes server settings to `~/.config/arcana/server.toml` (mode 0600):
+   port, public hostnames, and OAuth secrets (generated, or moved out of an
+   existing launchd job so connected clients keep working);
+3. installs the background service (launchd on macOS, `systemd --user` on
+   Linux); the service definition holds no secrets;
+4. registers the MCP server with Claude Code;
+5. checks the server answers and prints how to connect claude.ai and ChatGPT.
+
+The rest of this page explains each piece, for manual setups.
+
 ## Transports
 
 Arcana's MCP server supports three transports:
@@ -133,7 +158,7 @@ Clients send `Authorization: Bearer <token>` on every request.
 
 ### OAuth 2.1 with PKCE
 
-Full OAuth flow for MCP clients that support it (e.g. Claude.ai). Requires three values:
+Full OAuth flow for MCP clients that support it (claude.ai, ChatGPT). Requires three values (`arcana setup` generates them):
 
 ```bash
 export ARCANA_OAUTH_CLIENT_ID="your-client-id"
@@ -143,11 +168,52 @@ export ARCANA_OAUTH_PASSWORD="your-password"
 
 The OAuth flow:
 1. Client discovers endpoints via `GET /.well-known/oauth-authorization-server`
-2. Client fetches the single pre-configured client via `POST /register` — Arcana is single-user, so this returns the one static `client_id` rather than registering a new client
+2. Client registers via `POST /register` and receives a public `client_id` bound to its redirect URI (no secret; see below)
 3. User authorizes via browser (`GET /authorize`) — enters the password
 4. Client exchanges code for access token (`POST /token`)
 
-Both bearer token and OAuth can be active at the same time. For launchd/systemd, set all values as environment variables in the service definition.
+Clients that register themselves (ChatGPT, and MCP clients generally)
+become *public* clients: `/register` issues a client id derived from their
+redirect URI, and `/token` accepts it without a secret. Access still needs
+the password at `/authorize`, and PKCE binds the code to the client.
+Clients given the configured id and secret by hand (e.g. claude.ai's
+advanced settings) authenticate with the secret as before.
+
+Both bearer token and OAuth can be active at the same time. Rather than
+putting them in the service definition, keep them in
+`~/.config/arcana/server.toml` (what `arcana setup` writes); flags and
+environment variables override it:
+
+```toml
+port = 8787
+public_hosts = ["notes.example.com"]
+bearer_token = "…"
+
+[oauth]
+client_id = "…"
+client_secret = "…"
+password = "…"
+```
+
+Access tokens are held in memory: restarting the server signs connected
+clients out, and they ask to authorize again.
+
+## Allowing the public hostname
+
+The server accepts requests only for hostnames it knows. Loopback names
+(`localhost`, `127.0.0.1`, `::1`) always work; any name a client reaches it
+through must be listed, or every request is refused with
+`rejected request with disallowed Host header` in the log. This protects a
+server on your machine from DNS rebinding, where a web page tricks your
+browser into sending it requests.
+
+```bash
+arcana setup --public-host notes.example.com      # stored in server.toml
+# or: arcana serve --public-host notes.example.com
+# or: ARCANA_PUBLIC_HOSTS=notes.example.com arcana serve
+```
+
+This applies to both Tailscale and Cloudflare below.
 
 ## Remote access over Tailscale (recommended)
 
@@ -159,7 +225,9 @@ With the server running on `127.0.0.1:8787` (the default bind), publish that por
 tailscale serve --bg 8787
 ```
 
-Tailscale then proxies `https://<machine>.<your-tailnet>.ts.net/` to the local port (exact flags vary by Tailscale version — see `tailscale serve --help` / status with `tailscale serve status`). Point MCP clients on your other devices at that HTTPS URL.
+Then allow that hostname (see above): `arcana setup --public-host <machine>.<your-tailnet>.ts.net`.
+
+Tailscale proxies `https://<machine>.<your-tailnet>.ts.net/` to the local port (exact flags vary by Tailscale version — see `tailscale serve --help` / status with `tailscale serve status`). Point MCP clients on your other devices at that HTTPS URL.
 
 Because requests reach Arcana over the local proxy (from loopback) and only enrolled tailnet devices can connect, you get device-level authentication at the network layer without exposing the vault. The bearer token / OAuth below is then optional defense-in-depth rather than your only gate. This keeps Arcana's fail-closed default intact: it stays bound to loopback, never to a public interface.
 
@@ -180,7 +248,13 @@ cloudflared tunnel route dns arcana vault.yourdomain.com
 cloudflared tunnel run --url http://localhost:8787 arcana
 ```
 
-Then connect Claude.ai or other remote clients to `https://vault.yourdomain.com/mcp`.
+Allow the hostname (see above): `arcana setup --public-host vault.yourdomain.com`.
+Then connect Claude.ai, ChatGPT or other remote clients to
+`https://vault.yourdomain.com/mcp`.
+
+Keep the tunnel running as a service too (`cloudflared service install`), and
+if Cloudflare's bot protection is on for the zone, make sure it does not block
+requests from OpenAI's and Anthropic's servers.
 
 ## Connecting clients
 
@@ -210,7 +284,20 @@ claude mcp add --transport sse arcana https://your-server.example.com/sse \
 
 ### Claude.ai
 
-Add as a remote MCP server in Claude.ai settings, pointing to your server's URL. Claude.ai supports OAuth — configure the OAuth env vars and Claude.ai will handle the auth flow automatically.
+Settings → Connectors → Add custom connector, with
+`https://<public host>/mcp`. Claude.ai runs the OAuth flow; authorize with the
+password from `server.toml`.
+
+### ChatGPT
+
+Settings → Apps → Advanced → Developer mode, then create an app with
+`https://<public host>/mcp` and OAuth. ChatGPT registers itself and asks you to
+authorize with the password from `server.toml`. Which tools ChatGPT allows
+depends on the plan: OpenAI documents full MCP, including writes, for
+Business, Enterprise and Edu, and read/fetch tools for Pro
+([OpenAI Help](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)).
+Arcana marks `vault_search`, `vault_read` and `vault_decisions` read-only, so
+those work either way.
 
 ## File watcher
 
