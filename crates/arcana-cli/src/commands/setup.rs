@@ -201,7 +201,10 @@ pub fn run_setup(args: SetupArgs, vault_flag: Option<PathBuf>) -> Result<()> {
             vault.display()
         );
     }
-    print_next_steps(&settings, &settings_path, &home);
+    eprint!(
+        "{}",
+        connect_instructions(&settings, &settings_path, &home, &exe, &vault)
+    );
     Ok(())
 }
 
@@ -584,26 +587,59 @@ fn tilde(home: &Path, p: &Path) -> String {
     }
 }
 
-fn print_next_steps(settings: &ServerSettings, settings_path: &Path, home: &Path) {
-    let port = settings.port.unwrap_or(8787);
-    eprintln!("\nConnect from other apps:");
+/// Copy-ready field values for each client's "add MCP server" form.
+fn connect_instructions(
+    settings: &ServerSettings,
+    settings_path: &Path,
+    home: &Path,
+    exe: &Path,
+    vault: &Path,
+) -> String {
+    let mut out = String::new();
+    let mut line = |s: String| {
+        out.push_str(&s);
+        out.push('\n');
+    };
+    line(String::new());
+    line("Connect from other apps".into());
+    line(String::new());
+    line("ChatGPT desktop (Plugins → MCPs → Add → Connect to a custom MCP),".into());
+    line("on this machine; no tunnel or password needed:".into());
+    line(String::new());
+    line("  Name: arcana".into());
+    line("  Type: STDIO".into());
+    line(format!("  Command to launch: {}", exe.display()));
+    line("  Arguments (one per row):".into());
+    line("    --vault".into());
+    line(format!("    {}", vault.display()));
+    line("    serve".into());
+    line("  Environment variables: (none)".into());
+    line("  Working directory: (leave empty)".into());
+    line(String::new());
     if settings.public_hosts.is_empty() {
-        eprintln!(
-            "  The server listens only on this machine (127.0.0.1:{port}). To reach it from \
-             claude.ai, ChatGPT or your phone, expose it with Tailscale or a Cloudflare tunnel \
-             (docs/deployment.md), then rerun: arcana setup --public-host <that hostname>"
-        );
-        return;
+        line(format!(
+            "From claude.ai, ChatGPT on the web, or a phone: the server listens only on this \
+             machine (127.0.0.1:{}). Expose it with Tailscale or a Cloudflare tunnel \
+             (docs/deployment.md), then rerun: arcana setup --public-host <that hostname>",
+            settings.port.unwrap_or(8787)
+        ));
+        return out;
     }
     for h in &settings.public_hosts {
-        eprintln!("  MCP URL: https://{h}/mcp");
+        line("From anywhere (ChatGPT web, claude.ai, phone):".into());
+        line(String::new());
+        line("  Name: arcana".into());
+        line("  Type: Streamable HTTP".into());
+        line(format!("  URL: https://{h}/mcp"));
+        line("  Authentication: OAuth".into());
+        line(format!(
+            "  When asked to authorize: the OAuth password in {}",
+            tilde(home, settings_path)
+        ));
+        line(String::new());
     }
-    eprintln!(
-        "  claude.ai: Settings → Connectors → Add custom connector → the URL above.\n  \
-         ChatGPT: Settings → Apps → Advanced → Developer mode, then create an app with \
-         the URL above and OAuth.\n  When asked to authorize, use the OAuth password in {}.",
-        tilde(home, settings_path)
-    );
+    line("  claude.ai: Settings → Connectors → Add custom connector, with the URL above.".into());
+    out
 }
 
 #[cfg(test)]
@@ -651,5 +687,37 @@ mod tests {
     fn tokens_have_requested_length() {
         assert_eq!(random_token(32).len(), 64);
         assert_ne!(random_token(16), random_token(16));
+    }
+
+    #[test]
+    fn chatgpt_stdio_block_lists_each_field() {
+        let text = connect_instructions(
+            &ServerSettings::default(),
+            Path::new("/h/.config/arcana/server.toml"),
+            Path::new("/h"),
+            Path::new("/h/.cargo/bin/arcana"),
+            Path::new("/h/vault/notes"),
+        );
+        for want in [
+            "  Name: arcana\n",
+            "  Type: STDIO\n",
+            "  Command to launch: /h/.cargo/bin/arcana\n",
+            "    --vault\n    /h/vault/notes\n    serve\n",
+        ] {
+            assert!(text.contains(want), "missing {want:?} in:\n{text}");
+        }
+        let with_host = connect_instructions(
+            &ServerSettings {
+                public_hosts: vec!["notes.example.com".into()],
+                ..Default::default()
+            },
+            Path::new("/h/.config/arcana/server.toml"),
+            Path::new("/h"),
+            Path::new("/h/.cargo/bin/arcana"),
+            Path::new("/h/vault/notes"),
+        );
+        assert!(
+            with_host.contains("  Type: Streamable HTTP\n  URL: https://notes.example.com/mcp\n")
+        );
     }
 }
