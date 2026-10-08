@@ -251,3 +251,23 @@ fn search_snippets_have_no_mark_tags() {
         assert!(!stripped.contains("<mark>"));
     }
 }
+
+#[test]
+fn ledger_tools_declare_read_only_and_non_destructive_hints() {
+    let router = ArcanaServer::ledger_tool_router();
+    for tool in router.list_all() {
+        let a = tool
+            .annotations
+            .as_ref()
+            .expect("every ledger tool is annotated");
+        let read_only = matches!(
+            tool.name.as_ref(),
+            "vault_search" | "vault_read" | "vault_decisions"
+        );
+        assert_eq!(a.read_only_hint, Some(read_only), "{}", tool.name);
+        if !read_only {
+            // Writes never destroy: human words are only ever suggested against.
+            assert_eq!(a.destructive_hint, Some(false), "{}", tool.name);
+        }
+    }
+}

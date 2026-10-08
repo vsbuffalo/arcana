@@ -166,6 +166,7 @@ fn err(msg: impl Into<String>) -> rmcp::ErrorData {
 impl ArcanaServer {
     #[tool(
         name = "vault_search",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Full-text search over the vault. Search before creating anything: refine an existing note rather than adding a new one."
     )]
     async fn ledger_search(
@@ -194,6 +195,7 @@ impl ArcanaServer {
 
     #[tool(
         name = "vault_read",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Read a note: its content, kind (chapter, writing, log, pointer), who owns each block (human, agent, mixed), pending changes, its type's style guide, and `base` to pass to vault_edit."
     )]
     async fn ledger_read(
@@ -260,6 +262,12 @@ impl ArcanaServer {
 
     #[tool(
         name = "vault_edit",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Edit a note with text-anchored operations. You never overwrite a note. In chapters, new text and changes to agent-written text are written immediately (marked unreviewed). Anything touching the user's own words becomes a suggestion they accept or reject; keep those small and specific. Returns what happened to each edit and a word diff of what was written."
     )]
     async fn ledger_edit(
@@ -297,6 +305,12 @@ impl ArcanaServer {
 
     #[tool(
         name = "vault_create",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Create a new note, usually from a note type. Only after vault_search shows no existing note where this belongs; say why in `why_new`. The text lands marked unreviewed. You cannot create the user's own writing."
     )]
     async fn ledger_create(
@@ -329,6 +343,12 @@ impl ArcanaServer {
 
     #[tool(
         name = "vault_log",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = false
+        ),
         description = "Append a short dated entry to a log note (lab notebook, inventory changes, decisions). Logs are append-only. Do not write session summaries anywhere: put lasting knowledge into the chapter it belongs to with vault_edit."
     )]
     async fn ledger_log(
@@ -386,6 +406,7 @@ impl ArcanaServer {
 
     #[tool(
         name = "vault_decisions",
+        annotations(read_only_hint = true, open_world_hint = false),
         description = "Recent review decisions by the user on agent changes, with reasons for rejections. Read this before proposing similar changes again."
     )]
     async fn ledger_decisions(
