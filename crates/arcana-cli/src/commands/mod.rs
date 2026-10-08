@@ -16,6 +16,7 @@ pub mod serve;
 pub mod setup;
 pub mod skills;
 pub mod stats;
+pub mod token;
 
 use anyhow::Result;
 use arcana_core::ArcanaConfig;
@@ -57,6 +58,8 @@ pub enum Commands {
     Ledger(ledger::LedgerArgs),
     /// Install everything: vault, background server, Claude Code connection
     Setup(setup::SetupArgs),
+    /// Print or copy the server's bearer token (or OAuth password) for a client's form
+    Token(token::TokenArgs),
 }
 
 pub trait Run {
@@ -82,7 +85,9 @@ impl Commands {
             Commands::Ingest(args) => ingest::run_ingest(args, config, profile),
             Commands::Skills(args) => skills::run_skills(args, config, json),
             Commands::Ledger(args) => ledger::run_ledger(args, config, json),
-            Commands::Setup(_) => unreachable!("setup runs before a vault is resolved"),
+            Commands::Setup(_) | Commands::Token(_) => {
+                unreachable!("runs before a vault is resolved")
+            }
         }
     }
 }

@@ -285,8 +285,8 @@ claude mcp add --transport sse arcana https://your-server.example.com/sse \
 ### Claude.ai
 
 Settings → Connectors → Add custom connector, with
-`https://<public host>/mcp`. Claude.ai runs the OAuth flow; authorize with the
-password from `server.toml`.
+`https://<public host>/mcp`. Claude.ai runs the OAuth flow; when it asks you
+to authorize, paste the password from `arcana token --password --copy`.
 
 ### ChatGPT
 
@@ -301,33 +301,25 @@ Enterprise and Edu, and read/fetch tools for Pro
 Arcana marks `vault_search`, `vault_read` and `vault_decisions` read-only, so
 those work either way.
 
-The desktop form has two types. `arcana setup` prints the values for both.
-
-**STDIO** (the app starts arcana on the same machine; no tunnel or password):
-
-```
-Name: arcana
-Type: STDIO
-Command to launch: /Users/you/.cargo/bin/arcana
-Arguments (one per row):
-  --vault
-  /Users/you/vault/notes
-  serve
-Environment variables: (none)
-Working directory: (leave empty)
-```
-
-**Streamable HTTP** (through your public hostname; works from any machine):
+Connect through your public hostname, which works from any machine
+(`arcana setup` prints these values for your hostname):
 
 ```
-Name: arcana
-Type: Streamable HTTP
-URL: https://<public host>/mcp
-Authentication: OAuth
+Name:                  arcana
+Type:                  Streamable HTTP
+URL:                   https://<public host>/mcp
+Bearer token env var:  (leave empty)
+Headers:               Key   Authorization
+                       Value Bearer <token>
 ```
 
-ChatGPT registers itself and asks you to authorize with the password from
-`~/.config/arcana/server.toml`.
+`arcana token --copy` puts the token on the clipboard; paste it after
+`Bearer `. (The form's "Bearer token env var" reads the token from an
+environment variable of the ChatGPT app, which apps started from the Dock do
+not inherit from your shell; the header is simpler.)
+
+The form's other type, STDIO, starts arcana inside the ChatGPT app on the same
+machine. It needs no tunnel, but only that one machine can use it.
 
 ## File watcher
 
