@@ -290,14 +290,44 @@ password from `server.toml`.
 
 ### ChatGPT
 
-Settings → Apps → Advanced → Developer mode, then create an app with
-`https://<public host>/mcp` and OAuth. ChatGPT registers itself and asks you to
-authorize with the password from `server.toml`. Which tools ChatGPT allows
-depends on the plan: OpenAI documents full MCP, including writes, for
-Business, Enterprise and Edu, and read/fetch tools for Pro
+**Use the ChatGPT desktop app.** As of October 2026, adding a custom MCP
+server worked in the desktop app (Plugins → MCPs → Add → Connect to a custom
+MCP), while ChatGPT on the web offered only plugins from its directory for
+the account we tested. The reason is not documented; restricting the web to
+reviewed plugins for security is a likely one. Availability also depends on
+the plan: OpenAI documents full MCP, including writes, for Business,
+Enterprise and Edu, and read/fetch tools for Pro
 ([OpenAI Help](https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt)).
 Arcana marks `vault_search`, `vault_read` and `vault_decisions` read-only, so
 those work either way.
+
+The desktop form has two types. `arcana setup` prints the values for both.
+
+**STDIO** (the app starts arcana on the same machine; no tunnel or password):
+
+```
+Name: arcana
+Type: STDIO
+Command to launch: /Users/you/.cargo/bin/arcana
+Arguments (one per row):
+  --vault
+  /Users/you/vault/notes
+  serve
+Environment variables: (none)
+Working directory: (leave empty)
+```
+
+**Streamable HTTP** (through your public hostname; works from any machine):
+
+```
+Name: arcana
+Type: Streamable HTTP
+URL: https://<public host>/mcp
+Authentication: OAuth
+```
+
+ChatGPT registers itself and asks you to authorize with the password from
+`~/.config/arcana/server.toml`.
 
 ## File watcher
 

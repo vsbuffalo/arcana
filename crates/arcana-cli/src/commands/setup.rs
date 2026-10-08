@@ -603,7 +603,8 @@ fn connect_instructions(
     line(String::new());
     line("Connect from other apps".into());
     line(String::new());
-    line("ChatGPT desktop (Plugins → MCPs → Add → Connect to a custom MCP),".into());
+    line("ChatGPT: use the desktop app; the web offers only directory plugins.".into());
+    line("Plugins → MCPs → Add → Connect to a custom MCP,".into());
     line("on this machine; no tunnel or password needed:".into());
     line(String::new());
     line("  Name: arcana".into());
@@ -618,7 +619,7 @@ fn connect_instructions(
     line(String::new());
     if settings.public_hosts.is_empty() {
         line(format!(
-            "From claude.ai, ChatGPT on the web, or a phone: the server listens only on this \
+            "From claude.ai, another machine, or a phone: the server listens only on this \
              machine (127.0.0.1:{}). Expose it with Tailscale or a Cloudflare tunnel \
              (docs/deployment.md), then rerun: arcana setup --public-host <that hostname>",
             settings.port.unwrap_or(8787)
@@ -626,7 +627,7 @@ fn connect_instructions(
         return out;
     }
     for h in &settings.public_hosts {
-        line("From anywhere (ChatGPT web, claude.ai, phone):".into());
+        line("From any machine (ChatGPT desktop, claude.ai, phone):".into());
         line(String::new());
         line("  Name: arcana".into());
         line("  Type: Streamable HTTP".into());
