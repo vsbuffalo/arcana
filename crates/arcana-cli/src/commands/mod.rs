@@ -13,6 +13,7 @@ pub mod review;
 pub mod review_tui;
 pub mod search;
 pub mod serve;
+pub mod setup;
 pub mod skills;
 pub mod stats;
 
@@ -54,6 +55,8 @@ pub enum Commands {
     Skills(skills::SkillsArgs),
     /// Set up or inspect a vault that records who wrote every word
     Ledger(ledger::LedgerArgs),
+    /// Install everything: vault, background server, Claude Code connection
+    Setup(setup::SetupArgs),
 }
 
 pub trait Run {
@@ -79,6 +82,7 @@ impl Commands {
             Commands::Ingest(args) => ingest::run_ingest(args, config, profile),
             Commands::Skills(args) => skills::run_skills(args, config, json),
             Commands::Ledger(args) => ledger::run_ledger(args, config, json),
+            Commands::Setup(_) => unreachable!("setup runs before a vault is resolved"),
         }
     }
 }

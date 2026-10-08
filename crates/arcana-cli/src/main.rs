@@ -119,6 +119,11 @@ fn main() -> Result<()> {
         .with_target(false)
         .init();
 
+    // Setup creates the vault and config, so it runs before either must exist.
+    if let commands::Commands::Setup(args) = cli.command {
+        return commands::setup::run_setup(args, cli.vault);
+    }
+
     let vault_path = resolve_vault_path(cli.vault)?;
 
     let config = if let Some(ref config_path) = cli.config {

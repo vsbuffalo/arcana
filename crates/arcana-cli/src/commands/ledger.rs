@@ -223,7 +223,7 @@ fn ensure_lines(path: &Path, wanted: &str) -> Result<()> {
     std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))
 }
 
-fn init(config: &ArcanaConfig) -> Result<()> {
+pub fn init(config: &ArcanaConfig) -> Result<()> {
     let root = config.vault.path.clone();
     std::fs::create_dir_all(&root)?;
     let a = root.join(".arcana");
